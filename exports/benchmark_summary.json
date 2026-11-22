@@ -1,0 +1,67 @@
+{
+  "symbol": "BTC-USD",
+  "cycles_evaluated": 25,
+  "profile": "agent_paper",
+  "topology": {
+    "qwen_orchestrator": {
+      "execution_mode": "EXTERNAL_API",
+      "is_local_device": false,
+      "location_label": "API EXTERNA (No Local)",
+      "endpoint": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+      "model": "qwen2.5-14b-instruct"
+    },
+    "laya_alpha": {
+      "execution_mode": "LOCAL_DEVICE",
+      "is_local_device": true,
+      "location_label": "DISPOSITIVO LOCAL (Ollama /v1/systemone)",
+      "endpoint": "http://127.0.0.1:11434/v1/systemone",
+      "model": "laya:latest"
+    },
+    "laya_guard": {
+      "execution_mode": "LOCAL_DEVICE",
+      "is_local_device": true,
+      "location_label": "DISPOSITIVO LOCAL (Ollama /v1/systemone)",
+      "endpoint": "http://127.0.0.1:11434/v1/systemone",
+      "model": "laya:latest"
+    }
+  },
+  "lanes": [
+    {
+      "strategy": "1_Modelo_Sin_LLM",
+      "initial_capital": 50000.0,
+      "final_equity": 50000.0,
+      "net_return_pct": 0.0,
+      "max_drawdown_pct": 0.0,
+      "win_rate": "No definido",
+      "closed_trades": 0,
+      "total_orders": 0,
+      "avg_latency_ms": 5.23,
+      "rejected_actions": 1
+    },
+    {
+      "strategy": "2_Agente_DualLaya_Qwen",
+      "initial_capital": 50000.0,
+      "final_equity": 50000.0,
+      "net_return_pct": 0.0,
+      "max_drawdown_pct": 0.0,
+      "win_rate": "No definido",
+      "closed_trades": 0,
+      "total_orders": 0,
+      "avg_latency_ms": 63.61,
+      "rejected_actions": 0
+    },
+    {
+      "strategy": "3_Buy_And_Hold",
+      "initial_capital": 50000.0,
+      "final_equity": 36366.44,
+      "net_return_pct": -27.2671,
+      "max_drawdown_pct": 27.6448,
+      "win_rate": "No definido",
+      "closed_trades": 0,
+      "total_orders": 1,
+      "avg_latency_ms": 0.05,
+      "rejected_actions": 0
+    }
+  ],
+  "interpretation": "En la ventana evaluada de 25 ciclos sobre BTC-USD, la capa LLM/Laya obtuvo retorno +0.00% (vs +0.00% sin LLM y -27.27% Buy & Hold) con mayor latencia (63.6 ms), priorizando preservación de capital y trazabilidad auditable."
+}
