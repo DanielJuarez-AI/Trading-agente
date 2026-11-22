@@ -1,0 +1,97 @@
+# ==============================================================================
+# REGLAS INMUTABLES DE RIESGO (SOLO LECTURA EN RUNTIME - MIDDLE OFFICE)
+# Ningún agente LLM (Qwen ni Laya) tiene permiso de modificar estos umbrales.
+# ==============================================================================
+
+schema_version: "1.0.0"
+immutable_in_runtime: true
+
+# Perfiles oficiales de evaluación (Auditoría Cap. 9 vs Cap. 15)
+profiles:
+  agent_paper:
+    description: "Perfil Proyecto Final (Cap. 15): Capital 50,000, comisión 0.0%"
+    initial_capital: 50000.0
+    fee_pct: 0.0
+  practice_backtest:
+    description: "Perfil Práctica T4 (Cap. 9): Capital 100,000, comisión 0.10%"
+    initial_capital: 100000.0
+    fee_pct: 0.001
+
+# Límites deterministas de ejecución (Hard Gate)
+risk_controls:
+  max_exposure_pct: 1.0
+  max_daily_loss_pct: 0.03
+  slippage_bps: 5
+  min_lot_size: 0.0001
+  step_size: 0.0001
+  long_only: true
+  allow_leverage: false
+  allow_short_selling: false
+  enable_real_trading: false
+  max_data_age_seconds: 172800
+
+# Universo oficial de 30 activos + alias MEXC BTCUSDT
+primary_tickers:
+  - AAPL
+  - MSFT
+  - NVDA
+  - TSLA
+  - HWM
+  - JPM
+  - GOOGL
+  - AMZN
+  - META
+  - LMT
+  - WM
+  - LULU
+  - DIS
+  - V
+  - MA
+  - BTC-USD
+  - SPY
+  - QQQ
+  - NFLX
+  - AMD
+  - CRM
+  - ADBE
+  - PYPL
+  - COST
+  - HD
+  - UNH
+  - JNJ
+  - PG
+  - KO
+  - WMT
+
+allowed_tickers:
+  - AAPL
+  - MSFT
+  - NVDA
+  - TSLA
+  - HWM
+  - JPM
+  - GOOGL
+  - AMZN
+  - META
+  - LMT
+  - WM
+  - LULU
+  - DIS
+  - V
+  - MA
+  - BTC-USD
+  - BTCUSDT
+  - SPY
+  - QQQ
+  - NFLX
+  - AMD
+  - CRM
+  - ADBE
+  - PYPL
+  - COST
+  - HD
+  - UNH
+  - JNJ
+  - PG
+  - KO
+  - WMT

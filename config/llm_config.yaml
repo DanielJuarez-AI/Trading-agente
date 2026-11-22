@@ -1,0 +1,53 @@
+# ==============================================================================
+# CONFIGURACIÓN DE TOPOLOGÍA HÍBRIDA MULTI-AGENTE
+# - Qwen 14B (Orquestador System-2): [API EXTERNA - NO LOCAL]
+# - Laya #1 y Laya #2 (System-1):    [DISPOSITIVO LOCAL - OLLAMA /v1/systemone]
+# ==============================================================================
+
+topology_summary:
+  architecture: "Hybrid System-1 Local / System-2 External API"
+  qwen_location: "EXTERNAL_API"
+  laya_location: "LOCAL_DEVICE"
+
+# [API EXTERNA - NO EN DISPOSITIVO LOCAL]
+qwen_orchestrator:
+  execution_mode: "EXTERNAL_API"
+  local_device: false
+  provider: "openai_compatible_api"
+  base_url_env: "QWEN_API_BASE_URL"
+  api_key_env: "QWEN_API_KEY"
+  model: "qwen2.5-14b-instruct"
+  temperature: 0.1
+  max_tokens: 350
+  timeout_seconds: 30
+  max_retries: 2
+  strict_json_schema: true
+  note: "Qwen 14B se invoca exclusivamente por API externa remota, NO corre en Ollama local."
+
+# [DISPOSITIVO LOCAL - OLLAMA /v1/systemone]
+laya_alpha_agent:
+  agent_id: "laya_1_front_office"
+  execution_mode: "LOCAL_DEVICE"
+  local_device: true
+  provider: "ollama_local_systemone"
+  base_url_env: "OLLAMA_BASE_URL"
+  endpoint: "/v1/systemone"
+  model: "laya:latest"
+  max_budget_tokens: 300
+  timeout_seconds: 15
+  max_retries: 1
+  note: "Laya #1 corre en el dispositivo local vía Ollama /v1/systemone."
+
+# [DISPOSITIVO LOCAL - OLLAMA /v1/systemone]
+laya_guard_agent:
+  agent_id: "laya_2_middle_office"
+  execution_mode: "LOCAL_DEVICE"
+  local_device: true
+  provider: "ollama_local_systemone"
+  base_url_env: "OLLAMA_BASE_URL"
+  endpoint: "/v1/systemone"
+  model: "laya:latest"
+  max_budget_tokens: 300
+  timeout_seconds: 15
+  max_retries: 1
+  note: "Laya #2 corre en el dispositivo local vía Ollama /v1/systemone."
