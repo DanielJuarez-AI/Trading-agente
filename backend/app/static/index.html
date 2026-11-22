@@ -26,9 +26,18 @@
           Front Office (LSTM T4 + Dual Laya Local) ➔ Middle Office (Risk Hard Gate) ➔ Back Office (Paper + SQLite WAL)
         </p>
       </div>
-      <div class="flex items-center gap-2">
+      <div class="flex flex-wrap items-center gap-2">
         <span id="status-badge" class="px-3 py-1 rounded-full text-xs font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
           Estado: RUNNING
+        </span>
+        <span id="header-tf-badge" class="px-3 py-1 rounded-full text-xs font-semibold bg-indigo-500/20 text-indigo-300 border border-indigo-500/40">
+          Temporalidad: Día (1d)
+        </span>
+        <span id="header-laya-badge" class="px-3 py-1 rounded-full text-xs font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
+          Laya #1: DRL Dueling A2C
+        </span>
+        <span id="header-qwen-badge" class="px-3 py-1 rounded-full text-xs font-semibold bg-sky-500/20 text-sky-300 border border-sky-500/40">
+          Qwen: API EXTERNA (14B)
         </span>
         <span class="px-3 py-1 rounded-full text-xs font-semibold bg-cyan-500/20 text-cyan-300 border border-cyan-500/40">
           30 Tickers Activos
@@ -46,8 +55,8 @@
           <span class="text-[11px] text-gray-500">(Para Iniciar/Pausar/Detener/Replay)</span>
         </div>
 
-        <!-- Ticker Selector -->
-        <div class="flex items-center gap-3">
+        <!-- Ticker Selector, Temporalidad Hora/Día & Switch Qwen Local/API -->
+        <div class="flex flex-wrap items-center gap-3">
           <label class="text-xs font-medium text-gray-400">Activo (30 Tickers):</label>
           <select id="ticker-select" class="bg-gray-950 border border-gray-700 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-sky-500">
             <!-- Populated via JS -->
@@ -56,6 +65,14 @@
             <option value="replay">Historical Replay</option>
             <option value="live">Live Market (MEXC)</option>
           </select>
+          <div class="flex rounded-lg border border-gray-700 overflow-hidden" title="Temporalidad de operación del agente y gráfica">
+            <button id="btn-tf-1h" type="button" onclick="switchTimeframe('1h')" class="px-3 py-1.5 text-xs font-semibold bg-gray-950 text-gray-400 hover:text-white transition">Hora (1h)</button>
+            <button id="btn-tf-1d" type="button" onclick="switchTimeframe('1d')" class="px-3 py-1.5 text-xs font-semibold bg-indigo-600 text-white transition">Día (1d)</button>
+          </div>
+          <div class="flex rounded-lg border border-sky-700/60 overflow-hidden" title="Cambiar Qwen entre API Externa (14B) y Local 6GB VRAM (7B-Q4)">
+            <button id="btn-qwen-api" type="button" onclick="switchQwenMode('EXTERNAL_API')" class="px-3 py-1.5 text-xs font-semibold bg-sky-600 text-white transition">☁️ Qwen API (14B)</button>
+            <button id="btn-qwen-local" type="button" onclick="switchQwenMode('LOCAL_DEVICE')" class="px-3 py-1.5 text-xs font-semibold bg-gray-950 text-gray-400 hover:text-white transition">💻 Local 6GB (7B-Q4)</button>
+          </div>
         </div>
       </div>
 
@@ -124,11 +141,12 @@
             <button id="btn-type-line" type="button" onclick="setChartType('line')" class="px-2.5 py-1 font-medium bg-gray-950 text-gray-400 hover:text-white">Línea</button>
           </div>
 
-          <!-- Rango Temporal -->
+          <!-- Rango Temporal Adaptativo (1h / 1d + Ventana 1D) -->
           <div class="flex rounded-lg border border-gray-700 overflow-hidden">
-            <button id="btn-range-30" type="button" onclick="setChartRange(30)" class="px-2.5 py-1 font-medium bg-gray-950 text-gray-400 hover:text-white">30D</button>
-            <button id="btn-range-60" type="button" onclick="setChartRange(60)" class="px-2.5 py-1 font-medium bg-gray-950 text-gray-400 hover:text-white">60D</button>
-            <button id="btn-range-140" type="button" onclick="setChartRange(140)" class="px-2.5 py-1 font-medium bg-sky-600 text-white">140D</button>
+            <button id="btn-range-0" type="button" onclick="setChartRangeIdx(0)" class="px-2.5 py-1 font-medium bg-gray-950 text-gray-400 hover:text-white">1D</button>
+            <button id="btn-range-1" type="button" onclick="setChartRangeIdx(1)" class="px-2.5 py-1 font-medium bg-gray-950 text-gray-400 hover:text-white">30D</button>
+            <button id="btn-range-2" type="button" onclick="setChartRangeIdx(2)" class="px-2.5 py-1 font-medium bg-gray-950 text-gray-400 hover:text-white">60D</button>
+            <button id="btn-range-3" type="button" onclick="setChartRangeIdx(3)" class="px-2.5 py-1 font-medium bg-sky-600 text-white">140D</button>
           </div>
 
           <!-- Capas -->
@@ -141,6 +159,9 @@
           <label class="flex items-center gap-1 cursor-pointer text-gray-300">
             <input type="checkbox" id="chk-volume" checked onchange="renderChartFromState()" class="accent-gray-400"> Volumen
           </label>
+          <label class="flex items-center gap-1 cursor-pointer text-emerald-300">
+            <input type="checkbox" id="chk-forecast" checked onchange="renderChartFromState()" class="accent-emerald-400"> Pronóstico t+1
+          </label>
         </div>
       </div>
 
@@ -148,7 +169,86 @@
         <span>Mueve el cursor sobre la gráfica para inspeccionar OHLCV, EMA 10 y EMA 20</span>
       </div>
 
-      <div id="ticker-chart-container" class="w-full rounded-lg border border-gray-800 bg-gray-950/90 overflow-hidden" style="height: 380px;"></div>
+      <div class="grid grid-cols-1 lg:grid-cols-12 gap-4 items-stretch">
+        <!-- Columna Izquierda: Gráfica con Pronóstico de Fondo -->
+        <div class="lg:col-span-9 relative rounded-lg border border-gray-800 bg-gray-950/95 overflow-hidden" style="height: 390px;">
+          <div id="chart-forecast-backdrop" class="pointer-events-none absolute inset-0 flex items-center justify-center transition-all duration-500">
+            <div id="chart-forecast-watermark" class="hidden"></div>
+          </div>
+          <div id="ticker-chart-container" class="relative z-10 w-full h-full"></div>
+        </div>
+
+        <!-- Columna Derecha: Barras Horizontales de Pronóstico y Confianza del Agente -->
+        <aside id="confidence-bars-panel" class="lg:col-span-3 rounded-lg border border-gray-800 bg-gray-950/90 p-3.5 flex flex-col justify-between space-y-3 overflow-y-auto" style="max-height: 390px;">
+          <div class="space-y-2.5">
+            <div class="flex items-center justify-between border-b border-gray-800 pb-2">
+              <h4 class="text-xs font-bold uppercase tracking-wider text-gray-200">Pronóstico & Confianza</h4>
+              <span id="fc-action-pill" class="px-2 py-0.5 rounded text-[10px] font-bold bg-sky-500/20 text-sky-300">--</span>
+            </div>
+
+            <!-- Tarjeta Resumen t+1 -->
+            <div class="rounded-lg border border-gray-800 bg-gray-900/70 p-2.5 text-xs space-y-1">
+              <div class="flex items-center justify-between">
+                <span class="text-gray-400">Retorno t+1:</span>
+                <span id="fc-return-val" class="font-mono font-bold text-white">--</span>
+              </div>
+              <div class="flex items-center justify-between">
+                <span class="text-gray-400">Precio Objetivo:</span>
+                <span id="fc-target-price" class="font-mono font-semibold text-sky-300">--</span>
+              </div>
+              <div class="flex items-center justify-between text-[11px] text-gray-500">
+                <span id="fc-band-range">Banda ±1σ: --</span>
+              </div>
+            </div>
+
+            <!-- Barras Horizontales de Confianza Global -->
+            <div class="space-y-2 pt-1">
+              <p class="text-[10px] uppercase tracking-wider text-gray-400 font-semibold">Confianza del Agente</p>
+              <div class="space-y-1">
+                <div class="flex justify-between text-[11px]">
+                  <span id="lbl-conviction" class="text-gray-300">Convicción Global</span>
+                  <span id="val-conviction" class="font-mono text-amber-300">0%</span>
+                </div>
+                <div class="w-full h-2 bg-gray-800 rounded-full overflow-hidden">
+                  <div id="bar-conviction" class="h-full bg-amber-400 rounded-full transition-all duration-500" style="width: 0%"></div>
+                </div>
+              </div>
+
+              <div class="space-y-1">
+                <div class="flex justify-between text-[11px]">
+                  <span class="text-gray-300">Coherencia Laya #2</span>
+                  <span id="val-coherence" class="font-mono text-emerald-300">0%</span>
+                </div>
+                <div class="w-full h-2 bg-gray-800 rounded-full overflow-hidden">
+                  <div id="bar-coherence" class="h-full bg-emerald-400 rounded-full transition-all duration-500" style="width: 0%"></div>
+                </div>
+              </div>
+
+              <div class="space-y-1">
+                <div class="flex justify-between text-[11px]">
+                  <span class="text-gray-300">Fuerza / Volatilidad</span>
+                  <span id="val-strength" class="font-mono text-sky-300">0%</span>
+                </div>
+                <div class="w-full h-2 bg-gray-800 rounded-full overflow-hidden">
+                  <div id="bar-strength" class="h-full bg-sky-400 rounded-full transition-all duration-500" style="width: 0%"></div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Barras Horizontales de Probabilidad por Acción -->
+            <div class="space-y-1.5 border-t border-gray-800 pt-2">
+              <p class="text-[10px] uppercase tracking-wider text-gray-400 font-semibold">Probabilidad Acción (Laya #1)</p>
+              <div id="bars-signal-probs" class="space-y-1.5"></div>
+            </div>
+
+            <!-- Barras Horizontales de Régimen -->
+            <div class="space-y-1.5 border-t border-gray-800 pt-2">
+              <p class="text-[10px] uppercase tracking-wider text-gray-400 font-semibold">Confianza por Régimen</p>
+              <div id="bars-regime-probs" class="space-y-1.5"></div>
+            </div>
+          </div>
+        </aside>
+      </div>
     </section>
 
     <!-- Constelación de Agentes -->
@@ -158,40 +258,55 @@
         
         <!-- Laya #1 -->
         <div class="p-3 bg-gray-950/80 border border-emerald-500/30 rounded-lg">
-          <div class="flex items-center justify-between">
+          <div class="flex items-center justify-between gap-1">
             <span class="text-xs font-bold text-emerald-400">1. Laya #1 (Alpha)</span>
-            <span class="text-[10px] bg-emerald-500/20 text-emerald-300 px-1.5 py-0.5 rounded font-mono">LOCAL</span>
+            <div class="flex items-center gap-1">
+              <span id="node-laya1-ms" class="text-[10px] font-mono text-emerald-300 bg-gray-900 border border-emerald-500/20 px-1.5 py-0.5 rounded">-- ms</span>
+              <span id="node-laya1-badge" class="text-[10px] bg-emerald-500/20 text-emerald-300 px-1.5 py-0.5 rounded font-mono">LOCAL • DRL A2C</span>
+            </div>
           </div>
           <p id="node-laya1-regime" class="text-xs text-gray-200 mt-2 font-medium">Régimen: --</p>
           <p id="node-laya1-signal" class="text-xs text-gray-400">Señal: --</p>
           <p id="node-laya1-conv" class="text-[11px] text-gray-500">Convicción: --</p>
+          <p id="node-laya1-fb" class="text-[10px] text-amber-300/90 mt-1.5 font-mono line-clamp-2">Feedback Qwen: esperando ciclo...</p>
         </div>
 
         <!-- Orquestador -->
         <div class="p-3 bg-gray-950/80 border border-sky-500/30 rounded-lg">
-          <div class="flex items-center justify-between">
-            <span class="text-xs font-bold text-sky-400">2. Orquestador</span>
-            <span class="text-[10px] bg-sky-500/20 text-sky-300 px-1.5 py-0.5 rounded font-mono">SYSTEM-2</span>
+          <div class="flex items-center justify-between gap-1">
+            <span id="node-qwen-title" class="text-xs font-bold text-sky-400">2. Qwen (System-2)</span>
+            <div class="flex items-center gap-1">
+              <span id="node-qwen-ms" class="text-[10px] font-mono text-sky-300 bg-gray-900 border border-sky-500/20 px-1.5 py-0.5 rounded">-- ms</span>
+              <span id="node-qwen-badge" class="text-[10px] bg-sky-500/20 text-sky-300 px-1.5 py-0.5 rounded font-mono">API EXTERNA</span>
+            </div>
           </div>
           <p id="node-qwen-action" class="text-xs text-gray-200 mt-2 font-bold">Propuesta: --</p>
           <p id="node-qwen-just" class="text-[11px] text-gray-400 line-clamp-2 mt-1">--</p>
+          <p id="node-qwen-fb" class="text-[10px] text-amber-300/90 mt-1.5 font-mono line-clamp-2">Orquestador ➔ Laya #1 & #2: --</p>
         </div>
 
         <!-- Laya #2 -->
         <div class="p-3 bg-gray-950/80 border border-emerald-500/30 rounded-lg">
-          <div class="flex items-center justify-between">
+          <div class="flex items-center justify-between gap-1">
             <span class="text-xs font-bold text-emerald-400">3. Laya #2 (Guardia)</span>
-            <span class="text-[10px] bg-emerald-500/20 text-emerald-300 px-1.5 py-0.5 rounded font-mono">LOCAL</span>
+            <div class="flex items-center gap-1">
+              <span id="node-laya2-ms" class="text-[10px] font-mono text-fuchsia-300 bg-gray-900 border border-fuchsia-500/20 px-1.5 py-0.5 rounded">-- ms</span>
+              <span class="text-[10px] bg-emerald-500/20 text-emerald-300 px-1.5 py-0.5 rounded font-mono">LOCAL</span>
+            </div>
           </div>
           <p id="node-laya2-sec" class="text-xs text-gray-200 mt-2">Seguridad: --</p>
           <p id="node-laya2-coh" class="text-xs text-gray-400">Coherencia: --</p>
+          <p id="node-laya2-fb" class="text-[10px] text-fuchsia-300/90 mt-1.5 font-mono line-clamp-2">Feedback Qwen: rigor standard</p>
         </div>
 
         <!-- Risk Gate -->
         <div class="p-3 bg-gray-950/80 border border-amber-500/30 rounded-lg">
-          <div class="flex items-center justify-between">
+          <div class="flex items-center justify-between gap-1">
             <span class="text-xs font-bold text-amber-400">4. Motor de Riesgo</span>
-            <span class="text-[10px] bg-amber-500/20 text-amber-300 px-1.5 py-0.5 rounded font-mono">HARD GATE</span>
+            <div class="flex items-center gap-1">
+              <span id="node-risk-ms" class="text-[10px] font-mono text-amber-300 bg-gray-900 border border-amber-500/20 px-1.5 py-0.5 rounded">-- ms</span>
+              <span class="text-[10px] bg-amber-500/20 text-amber-300 px-1.5 py-0.5 rounded font-mono">HARD GATE</span>
+            </div>
           </div>
           <p id="node-risk-verdict" class="text-xs text-gray-200 mt-2 font-bold">Veredicto: --</p>
           <p id="node-risk-reason" class="text-[11px] text-gray-400 line-clamp-2 mt-1">--</p>
@@ -251,6 +366,44 @@
       </div>
     </section>
 
+    <!-- Mapa Estelar de Constelaciones: Paso de la Información -->
+    <section id="star-constellation-section" class="rounded-xl border border-indigo-500/30 bg-gray-950 p-5 shadow-2xl space-y-3">
+      <div class="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h3 class="text-sm font-bold text-indigo-200 uppercase tracking-wider flex items-center gap-2">
+            <span>✦</span> Mapa de Constelaciones • Paso en Vivo de la Información
+          </h3>
+          <p class="text-xs text-gray-400 mt-0.5">
+            Cada estrella representa un módulo/agente y los cometas de luz muestran la ruta exacta del mensaje y verificación en cada ciclo (<span id="star-tf-indicator" class="text-indigo-300 font-semibold">1d</span>).
+          </p>
+        </div>
+        <div class="flex flex-wrap items-center gap-2">
+          <span id="badge-cycle-ms" class="px-2 py-1 rounded bg-gray-900 border border-indigo-500/30 text-[11px] font-mono text-indigo-200">Ciclo IA: -- ms</span>
+          <span id="badge-fb-ms" class="px-2 py-1 rounded bg-gray-900 border border-amber-500/30 text-[11px] font-mono text-amber-300">Feedback Qwen: -- ms</span>
+          <span id="badge-sync-ms" class="px-2 py-1 rounded bg-gray-900 border border-sky-500/30 text-[11px] font-mono text-sky-300">Sync API: -- ms</span>
+          <span id="badge-render-ms" class="px-2 py-1 rounded bg-gray-900 border border-emerald-500/30 text-[11px] font-mono text-emerald-300">Render Mapa: -- ms</span>
+          <button type="button" onclick="triggerStarPulse(false)" class="rounded-lg border border-indigo-500/40 bg-indigo-500/20 px-3 py-1.5 text-xs font-semibold text-indigo-200 hover:bg-indigo-500/30 transition">
+            ✨ Lanzar Pulso de Información
+          </button>
+        </div>
+      </div>
+
+      <div class="relative rounded-xl border border-indigo-950/80 overflow-hidden bg-[#020410]" style="height: 440px;">
+        <canvas id="star-constellation-canvas" class="w-full h-full cursor-pointer block"></canvas>
+      </div>
+
+      <!-- Barra HUD Interactiva de Estrella Seleccionada -->
+      <div id="star-hud" class="rounded-lg border border-indigo-500/20 bg-gray-900/70 px-4 py-2.5 text-xs flex flex-wrap items-center justify-between gap-3">
+        <div class="flex items-center gap-2">
+          <span id="star-hud-badge" class="px-2 py-0.5 rounded bg-indigo-500/20 text-indigo-300 font-mono text-[10px]">ESTACIÓN ESTELAR</span>
+          <span id="star-hud-title" class="font-bold text-white">Haz clic o pasa el cursor sobre cualquier estrella</span>
+        </div>
+        <span id="star-hud-detail" class="text-gray-300 font-mono text-[11px]">
+          Observa el paso de datos: Mercado Público ➔ Ingesta ➔ LSTM T4 ➔ Laya #1 ➔ Gateway ➔ Qwen 14B ➔ Laya #2 ➔ Risk Gate & Paper
+        </span>
+      </div>
+    </section>
+
   </div>
 
   <script>
@@ -262,11 +415,31 @@
     ];
 
     let initialSyncDone = false;
+    let currentInterval = '1d';
+    let currentQwenMode = 'EXTERNAL_API';
+    let currentRangeIdx = 3;
     let currentChartType = 'candles';
     let currentChartLimit = 140;
     let latestChartPayload = null;
+    let latestStatusData = null;
+    let latestDecisionData = null;
     let lwChart = null;
     let lwResizeObserver = null;
+
+    const RANGE_PRESETS = {
+      '1h': [
+        { limit: 24, label: '1D (24H)', fetchInterval: '1h' },
+        { limit: 72, label: '3D (72H)', fetchInterval: '1h' },
+        { limit: 168, label: '7D (168H)', fetchInterval: '1h' },
+        { limit: 240, label: '10D (240H)', fetchInterval: '1h' },
+      ],
+      '1d': [
+        { limit: 24, label: '1D', fetchInterval: '1h' },
+        { limit: 30, label: '30D', fetchInterval: '1d' },
+        { limit: 60, label: '60D', fetchInterval: '1d' },
+        { limit: 140, label: '140D', fetchInterval: '1d' },
+      ],
+    };
 
     // Initialize select options
     const tickerSelect = document.getElementById('ticker-select');
@@ -297,6 +470,65 @@
       setTimeout(() => el.classList.add('hidden'), 4000);
     }
 
+    function updateTimeframeAndRangeUI() {
+      const is1h = currentInterval === '1h';
+      document.getElementById('btn-tf-1h').className = `px-3 py-1.5 text-xs font-semibold transition ${is1h ? 'bg-indigo-600 text-white' : 'bg-gray-950 text-gray-400 hover:text-white'}`;
+      document.getElementById('btn-tf-1d').className = `px-3 py-1.5 text-xs font-semibold transition ${!is1h ? 'bg-indigo-600 text-white' : 'bg-gray-950 text-gray-400 hover:text-white'}`;
+      document.getElementById('header-tf-badge').textContent = is1h ? 'Temporalidad: Hora (1h)' : 'Temporalidad: Día (1d)';
+      const starTf = document.getElementById('star-tf-indicator');
+      if (starTf) starTf.textContent = is1h ? 'Hora (1h)' : 'Día (1d)';
+
+      const presets = RANGE_PRESETS[currentInterval] || RANGE_PRESETS['1d'];
+      if (currentRangeIdx >= presets.length || currentRangeIdx < 0) currentRangeIdx = presets.length - 1;
+      currentChartLimit = presets[currentRangeIdx].limit;
+      presets.forEach((p, idx) => {
+        const btn = document.getElementById(`btn-range-${idx}`);
+        if (!btn) return;
+        btn.textContent = p.label;
+        btn.className = `px-2.5 py-1 font-medium ${idx === currentRangeIdx ? 'bg-sky-600 text-white' : 'bg-gray-950 text-gray-400 hover:text-white'}`;
+      });
+    }
+
+    async function switchTimeframe(tf) {
+      currentInterval = tf;
+      updateTimeframeAndRangeUI();
+      await loadTickerChart(tickerSelect.value);
+      await controlAction('switch_interval', { interval: tf });
+    }
+
+    function updateQwenModeUI(mode) {
+      currentQwenMode = mode === 'LOCAL_DEVICE' ? 'LOCAL_DEVICE' : 'EXTERNAL_API';
+      const isLocal = currentQwenMode === 'LOCAL_DEVICE';
+      document.getElementById('btn-qwen-api').className = `px-3 py-1.5 text-xs font-semibold transition ${!isLocal ? 'bg-sky-600 text-white' : 'bg-gray-950 text-gray-400 hover:text-white'}`;
+      document.getElementById('btn-qwen-local').className = `px-3 py-1.5 text-xs font-semibold transition ${isLocal ? 'bg-violet-600 text-white' : 'bg-gray-950 text-gray-400 hover:text-white'}`;
+      document.getElementById('header-qwen-badge').textContent = isLocal ? 'Qwen: LOCAL 6GB (7B-Q4)' : 'Qwen: API EXTERNA (14B)';
+      document.getElementById('header-qwen-badge').className = `px-3 py-1 rounded-full text-xs font-semibold ${isLocal ? 'bg-violet-500/20 text-violet-300 border border-violet-500/40' : 'bg-sky-500/20 text-sky-300 border border-sky-500/40'}`;
+
+      const qBadge = document.getElementById('node-qwen-badge');
+      const qTitle = document.getElementById('node-qwen-title');
+      if (qBadge) {
+        qBadge.textContent = isLocal ? 'LOCAL 6GB (7B-Q4)' : 'API EXTERNA (14B)';
+        qBadge.className = `text-[10px] px-1.5 py-0.5 rounded font-mono ${isLocal ? 'bg-violet-500/20 text-violet-300' : 'bg-sky-500/20 text-sky-300'}`;
+      }
+      if (qTitle) {
+        qTitle.textContent = isLocal ? '2. Qwen 7B-Q4 (Local 6GB)' : '2. Qwen 14B (API Externa)';
+      }
+
+      // Actualizar estrellas en mapa de constelaciones
+      if (typeof STAR_NODES !== 'undefined' && STAR_NODES[5]) {
+        STAR_NODES[3].name = 'Laya #1 (DRL Local)';
+        STAR_NODES[3].tag = 'DRL DUELING A2C';
+        STAR_NODES[5].name = isLocal ? 'Qwen 7B-Q4 (Local 6GB)' : 'Qwen 14B (API Ext.)';
+        STAR_NODES[5].tag = isLocal ? 'LOCAL 6GB VRAM' : 'API EXTERNA';
+        STAR_NODES[5].color = isLocal ? '#c084fc' : '#38bdf8';
+      }
+    }
+
+    async function switchQwenMode(mode) {
+      updateQwenModeUI(mode);
+      await controlAction('switch_qwen_mode', { qwen_mode: mode });
+    }
+
     function setChartType(type) {
       currentChartType = type;
       document.getElementById('btn-type-candles').className = `px-2.5 py-1 font-medium ${type === 'candles' ? 'bg-sky-600 text-white' : 'bg-gray-950 text-gray-400 hover:text-white'}`;
@@ -304,11 +536,9 @@
       renderChartFromState();
     }
 
-    function setChartRange(days) {
-      currentChartLimit = days;
-      [30, 60, 140].forEach(d => {
-        document.getElementById(`btn-range-${d}`).className = `px-2.5 py-1 font-medium ${days === d ? 'bg-sky-600 text-white' : 'bg-gray-950 text-gray-400 hover:text-white'}`;
-      });
+    function setChartRangeIdx(idx) {
+      currentRangeIdx = idx;
+      updateTimeframeAndRangeUI();
       loadTickerChart(tickerSelect.value);
     }
 
@@ -318,7 +548,7 @@
       const isUp = candle.close >= candle.open;
       const col = isUp ? 'text-emerald-400' : 'text-rose-400';
       leg.innerHTML = `
-        <span class="text-gray-300">${candle.time}</span>
+        <span class="text-gray-300">${candle.label || candle.time}</span>
         <span>O: <strong class="${col}">${Number(candle.open).toLocaleString()}</strong></span>
         <span>H: <strong class="${col}">${Number(candle.high).toLocaleString()}</strong></span>
         <span>L: <strong class="${col}">${Number(candle.low).toLocaleString()}</strong></span>
@@ -329,33 +559,37 @@
       `;
     }
 
-    function renderCanvasFallback(container, payload, showEma10, showEma20) {
+    function renderCanvasFallback(container, payload, showEma10, showEma20, showForecast) {
       container.innerHTML = '';
       const canvas = document.createElement('canvas');
       canvas.width = container.clientWidth || 900;
-      canvas.height = 380;
+      canvas.height = 390;
       container.appendChild(canvas);
       const ctx = canvas.getContext('2d');
       const candles = payload.candles || [];
       if (!candles.length) return;
 
-      const pad = { top: 20, right: 60, bottom: 28, left: 16 };
+      const af = showForecast ? payload.agent_forecast : null;
+      const pad = { top: 20, right: 72, bottom: 28, left: 16 };
       const w = canvas.width - pad.left - pad.right;
       const h = canvas.height - pad.top - pad.bottom;
 
-      const vals = candles.flatMap(c => [c.low, c.high, c.ema10, c.ema20]);
+      const vals = [
+        ...candles.flatMap(c => [c.low, c.high, c.ema10, c.ema20]),
+        ...(af ? [af.projected_close_t1, af.band_upper_t1, af.band_lower_t1] : [])
+      ];
       const minV = Math.min(...vals);
       const maxV = Math.max(...vals);
       const span = Math.max(maxV - minV, 1e-6);
 
-      const toX = i => pad.left + (candles.length > 1 ? (i / (candles.length - 1)) * w : w / 2);
+      const totalSteps = af ? candles.length + 1 : candles.length;
+      const toX = i => pad.left + (totalSteps > 1 ? (i / (totalSteps - 1)) * w : w / 2);
       const toY = v => pad.top + h - ((v - minV) / span) * h;
 
-      ctx.fillStyle = '#030712';
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
 
       // Grid horizontal
-      ctx.strokeStyle = '#1f2937';
+      ctx.strokeStyle = 'rgba(31, 41, 55, 0.7)';
       ctx.lineWidth = 1;
       for (let g = 0; g <= 4; g++) {
         const y = pad.top + (g / 4) * h;
@@ -370,7 +604,7 @@
       }
 
       if (currentChartType === 'candles') {
-        const cw = Math.max(2, (w / candles.length) * 0.6);
+        const cw = Math.max(2, (w / totalSteps) * 0.6);
         candles.forEach((c, i) => {
           const x = toX(i);
           const color = c.close >= c.open ? '#10b981' : '#f43f5e';
@@ -409,6 +643,133 @@
       };
       if (showEma10) drawEma('ema10', '#fbbf24');
       if (showEma20) drawEma('ema20', '#38bdf8');
+
+      if (af) {
+        const lastC = candles[candles.length - 1];
+        const fc = af.forecast_candle || {
+          open: lastC.close,
+          high: Math.max(lastC.close, af.projected_close_t1, af.band_upper_t1),
+          low: Math.min(lastC.close, af.projected_close_t1, af.band_lower_t1),
+          close: af.projected_close_t1,
+        };
+        const isBull = fc.close >= fc.open;
+        const fcFill = isBull ? 'rgba(16, 185, 129, 0.32)' : 'rgba(244, 63, 94, 0.32)';
+        const fcStroke = isBull ? 'rgba(16, 185, 129, 0.68)' : 'rgba(244, 63, 94, 0.68)';
+        const fcWick = isBull ? 'rgba(16, 185, 129, 0.55)' : 'rgba(244, 63, 94, 0.55)';
+        const x1 = toX(candles.length);
+        const fcW = Math.max(4, (w / Math.max(totalSteps, 1)) * 0.62);
+        const bodyTop = toY(Math.max(fc.open, fc.close));
+        const bodyBot = toY(Math.min(fc.open, fc.close));
+        const bodyH = Math.max(3, bodyBot - bodyTop);
+
+        ctx.save();
+        ctx.strokeStyle = fcWick;
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(x1, toY(fc.high));
+        ctx.lineTo(x1, toY(fc.low));
+        ctx.stroke();
+
+        ctx.fillStyle = fcFill;
+        ctx.fillRect(x1 - fcW / 2, bodyTop, fcW, bodyH);
+        ctx.strokeStyle = fcStroke;
+        ctx.lineWidth = 1.2;
+        ctx.strokeRect(x1 - fcW / 2, bodyTop, fcW, bodyH);
+        ctx.restore();
+      }
+    }
+
+    function renderHorizontalBarRow(label, pct, colorClass) {
+      const clamped = Math.max(0, Math.min(100, Number(pct) || 0));
+      return `
+        <div class="space-y-0.5">
+          <div class="flex justify-between text-[11px]">
+            <span class="text-gray-300">${label}</span>
+            <span class="font-mono text-gray-200">${clamped.toFixed(1)}%</span>
+          </div>
+          <div class="w-full h-1.5 bg-gray-800 rounded-full overflow-hidden">
+            <div class="h-full ${colorClass} rounded-full transition-all duration-500" style="width: ${clamped.toFixed(1)}%"></div>
+          </div>
+        </div>
+      `;
+    }
+
+    function updateForecastAndConfidencePanel(payload) {
+      const af = payload ? payload.agent_forecast : null;
+      const backdrop = document.getElementById('chart-forecast-backdrop');
+      const watermark = document.getElementById('chart-forecast-watermark');
+      const showForecast = document.getElementById('chk-forecast').checked;
+
+      if (!af) {
+        backdrop.style.background = 'none';
+        watermark.textContent = '';
+        return;
+      }
+
+      const isUp = af.direction === 'UP' || af.signal_action === 'BUY';
+      const isDown = af.direction === 'DOWN' || af.signal_action === 'SELL';
+      watermark.textContent = '';
+      if (showForecast) {
+        if (isUp) {
+          backdrop.style.background = 'radial-gradient(circle at 82% 45%, rgba(16, 185, 129, 0.14), rgba(16, 185, 129, 0.03) 45%, transparent 72%)';
+        } else if (isDown) {
+          backdrop.style.background = 'radial-gradient(circle at 82% 45%, rgba(244, 63, 94, 0.14), rgba(244, 63, 94, 0.03) 45%, transparent 72%)';
+        } else {
+          backdrop.style.background = 'radial-gradient(circle at 82% 45%, rgba(56, 189, 248, 0.12), transparent 70%)';
+        }
+      } else {
+        backdrop.style.background = 'none';
+      }
+
+      // Panel lateral
+      const pill = document.getElementById('fc-action-pill');
+      pill.textContent = af.signal_action;
+      pill.className = `px-2 py-0.5 rounded text-[10px] font-bold ${
+        af.signal_action === 'BUY' ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40' :
+        af.signal_action === 'SELL' ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40' :
+        'bg-sky-500/20 text-sky-300 border border-sky-500/40'
+      }`;
+
+      const retEl = document.getElementById('fc-return-val');
+      const retPct = Number(af.pred_return_pct);
+      retEl.textContent = `${retPct >= 0 ? '+' : ''}${retPct.toFixed(3)}%`;
+      retEl.className = `font-mono font-bold ${retPct >= 0 ? 'text-emerald-400' : 'text-rose-400'}`;
+
+      const hLbl = af.horizon_label || (currentInterval === '1h' ? '+1H' : '+1D');
+      document.getElementById('fc-target-price').textContent = `$${Number(af.projected_close_t1).toLocaleString()} (${hLbl})`;
+      document.getElementById('fc-band-range').textContent = `Banda ±1σ: $${Number(af.band_lower_t1).toLocaleString()} — $${Number(af.band_upper_t1).toLocaleString()}`;
+
+      const convPct = Math.max(0, Math.min(100, Number(af.conviction_score) * 100));
+      const cohPct = Math.max(0, Math.min(100, Number(af.coherence_prob) * 100));
+      const strPct = Math.max(0, Math.min(100, Number(af.signal_strength) * 100));
+
+      document.getElementById('lbl-conviction').textContent = `Convicción (${af.conviction_level})`;
+      document.getElementById('val-conviction').textContent = `${convPct.toFixed(1)}%`;
+      document.getElementById('bar-conviction').style.width = `${convPct.toFixed(1)}%`;
+
+      document.getElementById('val-coherence').textContent = `${cohPct.toFixed(1)}%`;
+      document.getElementById('bar-coherence').style.width = `${cohPct.toFixed(1)}%`;
+
+      document.getElementById('val-strength').textContent = `${strPct.toFixed(1)}%`;
+      document.getElementById('bar-strength').style.width = `${strPct.toFixed(1)}%`;
+
+      // Probabilidades de acción Laya #1
+      const sp = af.signal_probs || {};
+      document.getElementById('bars-signal-probs').innerHTML = [
+        renderHorizontalBarRow('BUY', (sp.BUY || 0) * 100, 'bg-emerald-500'),
+        renderHorizontalBarRow('HOLD', (sp.HOLD || 0) * 100, 'bg-sky-500'),
+        renderHorizontalBarRow('SELL', (sp.SELL || 0) * 100, 'bg-rose-500'),
+      ].join('');
+
+      // Probabilidades de régimen Laya #1
+      const rp = af.regime_probs || {};
+      document.getElementById('bars-regime-probs').innerHTML = [
+        renderHorizontalBarRow('Bull Trend', (rp.bull_trend || 0) * 100, 'bg-emerald-500'),
+        renderHorizontalBarRow('Sideways', (rp.sideways || 0) * 100, 'bg-violet-500'),
+        renderHorizontalBarRow('Bear Trend', (rp.bear_trend || 0) * 100, 'bg-rose-500'),
+        renderHorizontalBarRow('High Vol Chop', (rp.high_vol_chop || 0) * 100, 'bg-amber-500'),
+        renderHorizontalBarRow('None / Neutral', (rp.none || 0) * 100, 'bg-gray-500'),
+      ].join('');
     }
 
     function renderChartFromState() {
@@ -420,8 +781,10 @@
       const showEma10 = document.getElementById('chk-ema10').checked;
       const showEma20 = document.getElementById('chk-ema20').checked;
       const showVol = document.getElementById('chk-volume').checked;
+      const showForecast = document.getElementById('chk-forecast').checked;
 
       updateOhlcLegend(candles[candles.length - 1]);
+      updateForecastAndConfidencePanel(latestChartPayload);
 
       if (lwResizeObserver) {
         lwResizeObserver.disconnect();
@@ -433,21 +796,21 @@
       }
 
       if (typeof window.LightweightCharts === 'undefined') {
-        renderCanvasFallback(container, latestChartPayload, showEma10, showEma20);
+        renderCanvasFallback(container, latestChartPayload, showEma10, showEma20, showForecast);
         return;
       }
 
       container.innerHTML = '';
       lwChart = window.LightweightCharts.createChart(container, {
         width: container.clientWidth,
-        height: 380,
+        height: 390,
         layout: {
-          background: { type: 'solid', color: '#030712' },
+          background: { type: 'solid', color: 'transparent' },
           textColor: '#9ca3af',
         },
         grid: {
-          vertLines: { color: '#111827' },
-          horzLines: { color: '#111827' },
+          vertLines: { color: 'rgba(31, 41, 55, 0.45)' },
+          horzLines: { color: 'rgba(31, 41, 55, 0.45)' },
         },
         crosshair: {
           mode: window.LightweightCharts.CrosshairMode.Normal,
@@ -457,9 +820,34 @@
         },
         timeScale: {
           borderColor: '#1f2937',
-          timeVisible: true,
+          timeVisible: (latestChartPayload.interval || currentInterval) === '1h',
+          secondsVisible: false,
         },
       });
+
+      const af = latestChartPayload.agent_forecast;
+      const lastCandle = candles[candles.length - 1];
+      let fcBar = null;
+      if (showForecast && af && lastCandle) {
+        const fcRaw = af.forecast_candle || {
+          time: af.next_time,
+          open: lastCandle.close,
+          high: Math.max(lastCandle.close, af.projected_close_t1, af.band_upper_t1),
+          low: Math.min(lastCandle.close, af.projected_close_t1, af.band_lower_t1),
+          close: af.projected_close_t1,
+        };
+        const isFcBull = fcRaw.close >= fcRaw.open;
+        fcBar = {
+          time: fcRaw.time,
+          open: fcRaw.open,
+          high: fcRaw.high,
+          low: fcRaw.low,
+          close: fcRaw.close,
+          color: isFcBull ? 'rgba(16, 185, 129, 0.32)' : 'rgba(244, 63, 94, 0.32)',
+          borderColor: isFcBull ? 'rgba(16, 185, 129, 0.68)' : 'rgba(244, 63, 94, 0.68)',
+          wickColor: isFcBull ? 'rgba(16, 185, 129, 0.55)' : 'rgba(244, 63, 94, 0.55)',
+        };
+      }
 
       let mainSeries;
       if (currentChartType === 'candles') {
@@ -471,13 +859,15 @@
           wickUpColor: '#10b981',
           wickDownColor: '#f43f5e',
         });
-        mainSeries.setData(candles.map(c => ({
+        const candleData = candles.map(c => ({
           time: c.time,
           open: c.open,
           high: c.high,
           low: c.low,
           close: c.close,
-        })));
+        }));
+        if (fcBar) candleData.push(fcBar);
+        mainSeries.setData(candleData);
       } else {
         mainSeries = lwChart.addAreaSeries({
           lineColor: '#38bdf8',
@@ -489,6 +879,13 @@
           time: c.time,
           value: c.close,
         })));
+        if (fcBar) {
+          const fcCandleSeries = lwChart.addCandlestickSeries({
+            priceLineVisible: false,
+            lastValueVisible: false,
+          });
+          fcCandleSeries.setData([fcBar]);
+        }
       }
 
       // Marcadores de decisiones BUY/SELL del agente
@@ -541,7 +938,7 @@
       lwChart.timeScale().fitContent();
 
       // Actualizar leyenda OHLCV al mover cursor
-      const byTime = new Map(candles.map(c => [c.time, c]));
+      const byTime = new Map(candles.map(c => [String(c.time), c]));
       lwChart.subscribeCrosshairMove(param => {
         if (!param || !param.time) {
           updateOhlcLegend(candles[candles.length - 1]);
@@ -563,19 +960,27 @@
       try {
         const sym = symbol || tickerSelect.value || 'BTC-USD';
         const mode = document.getElementById('mode-select').value || 'replay';
-        const res = await fetch(`${API_BASE}/api/candles?symbol=${encodeURIComponent(sym)}&limit=${currentChartLimit}&mode=${encodeURIComponent(mode)}`);
+        const presets = RANGE_PRESETS[currentInterval] || RANGE_PRESETS['1d'];
+        const activePreset = presets[currentRangeIdx] || presets[presets.length - 1];
+        const effectiveLimit = activePreset.limit || currentChartLimit;
+        const effectiveInterval = activePreset.fetchInterval || currentInterval;
+        const res = await fetch(`${API_BASE}/api/candles?symbol=${encodeURIComponent(sym)}&limit=${effectiveLimit}&mode=${encodeURIComponent(mode)}&interval=${encodeURIComponent(effectiveInterval)}`);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
         latestChartPayload = data;
 
-        document.getElementById('chart-symbol').textContent = `Gráfica: ${data.symbol}`;
+        const tfTag = (data.interval || effectiveInterval).toUpperCase();
+        const hTag = activePreset.label === '1D' && currentInterval === '1d'
+          ? 'VENTANA 1D (24H)'
+          : (data.horizon_label || (tfTag === '1H' ? '1H' : '1D'));
+        document.getElementById('chart-symbol').textContent = `Gráfica: ${data.symbol} (${tfTag})`;
         document.getElementById('chart-last-price').textContent = `$${Number(data.last_close).toLocaleString()}`;
         const chgEl = document.getElementById('chart-change-badge');
         const chg = Number(data.change_pct_1d);
-        chgEl.textContent = `${chg >= 0 ? '+' : ''}${chg.toFixed(2)}% (1D)`;
+        chgEl.textContent = `${chg >= 0 ? '+' : ''}${chg.toFixed(2)}% (${tfTag})`;
         chgEl.className = `px-2 py-0.5 rounded text-xs font-semibold ${chg >= 0 ? 'bg-emerald-500/20 text-emerald-300' : 'bg-rose-500/20 text-rose-300'}`;
         document.getElementById('chart-range').textContent = `Máx: $${Number(data.high_period).toLocaleString()} | Mín: $${Number(data.low_period).toLocaleString()}`;
-        document.getElementById('chart-source-badge').textContent = data.data_source;
+        document.getElementById('chart-source-badge').textContent = `${data.data_source} • ${tfTag} • ${hTag}`;
 
         renderChartFromState();
       } catch (err) {
@@ -600,6 +1005,7 @@
         await refreshDashboard();
         if (action === 'step' || action === 'replay') {
           await loadTickerChart(tickerSelect.value);
+          triggerStarPulse(false);
         }
       } catch (err) {
         showFeedback(err.message, true);
@@ -608,21 +1014,33 @@
 
     async function runReplayBatch(n = 25) {
       const sym = tickerSelect.value;
-      await controlAction('replay', { symbol: sym, n_cycles: n });
+      await controlAction('replay', { symbol: sym, n_cycles: n, interval: currentInterval });
     }
 
     async function refreshDashboard() {
       try {
+        const tSync0 = performance.now();
         const [stRes, decRes] = await Promise.all([
           fetch(`${API_BASE}/api/status`).then(r => r.json()),
           fetch(`${API_BASE}/api/decisions?limit=30`).then(r => r.json())
         ]);
+        const syncMs = performance.now() - tSync0;
+        latestStatusData = stRes;
+        latestStatusData._client_sync_ms = syncMs;
+
+        const syncBadge = document.getElementById('badge-sync-ms');
+        if (syncBadge) syncBadge.textContent = `Sync API: ${syncMs.toFixed(1)} ms`;
 
         if (!initialSyncDone) {
           initialSyncDone = true;
           if (stRes.active_ticker) tickerSelect.value = stRes.active_ticker;
           if (stRes.source_mode) document.getElementById('mode-select').value = stRes.source_mode;
+          if (stRes.candle_interval) currentInterval = stRes.candle_interval;
+          if (stRes.qwen_mode) updateQwenModeUI(stRes.qwen_mode);
+          updateTimeframeAndRangeUI();
           loadTickerChart(tickerSelect.value);
+        } else if (stRes.qwen_mode && stRes.qwen_mode !== currentQwenMode) {
+          updateQwenModeUI(stRes.qwen_mode);
         }
 
         // Status badge
@@ -644,8 +1062,51 @@
         document.getElementById('card-pos').textContent = Number(stRes.portfolio.position_qty).toFixed(4);
         document.getElementById('card-dd').textContent = `Max DD: ${Number(stRes.metrics.max_drawdown_pct).toFixed(2)}% | Win Rate: ${stRes.metrics.win_rate}`;
 
-        // Latest Decision Node details
+        // Latest Decision Node details & Feedback / Latencies (ms)
         const latest = decRes.items && decRes.items.length > 0 ? decRes.items[0] : null;
+        latestDecisionData = latest;
+
+        const stLat = (stRes.stage_latencies_ms && Object.keys(stRes.stage_latencies_ms).length)
+          ? stRes.stage_latencies_ms
+          : (latest?.qwen_json?.stage_latencies_ms || {});
+        const fb1 = (stRes.laya1_feedback && Object.keys(stRes.laya1_feedback).length)
+          ? stRes.laya1_feedback
+          : (latest?.qwen_json?.orchestrator_feedback?.to_laya1 || {});
+        const fb2 = (stRes.laya2_feedback && Object.keys(stRes.laya2_feedback).length)
+          ? stRes.laya2_feedback
+          : (latest?.qwen_json?.orchestrator_feedback?.to_laya2 || {});
+
+        const cycleMs = Number(stLat.total_cycle_ms ?? latest?.latency_ms ?? 0);
+        const fbMs = Number(stLat.feedback_laya1_ms ?? 0) + Number(stLat.feedback_laya2_ms ?? 0);
+        const cycleBadge = document.getElementById('badge-cycle-ms');
+        const fbBadge = document.getElementById('badge-fb-ms');
+        if (cycleBadge) cycleBadge.textContent = cycleMs > 0 ? `Ciclo IA: ${cycleMs.toFixed(2)} ms` : 'Ciclo IA: -- ms';
+        if (fbBadge) fbBadge.textContent = stLat.total_cycle_ms !== undefined ? `Feedback Qwen: ${fbMs.toFixed(2)} ms` : 'Feedback Qwen: -- ms';
+
+        const l1MsEl = document.getElementById('node-laya1-ms');
+        const qMsEl = document.getElementById('node-qwen-ms');
+        const l2MsEl = document.getElementById('node-laya2-ms');
+        const rMsEl = document.getElementById('node-risk-ms');
+        if (l1MsEl) l1MsEl.textContent = `${Number(stLat.laya1_ms ?? latest?.laya1_json?.latency_ms ?? 0).toFixed(2)} ms`;
+        if (qMsEl) qMsEl.textContent = `${Number(stLat.qwen_ms ?? latest?.qwen_json?.latency_ms ?? 0).toFixed(2)} ms`;
+        if (l2MsEl) l2MsEl.textContent = `${Number(stLat.laya2_ms ?? latest?.laya2_json?.latency_ms ?? 0).toFixed(2)} ms`;
+        if (rMsEl) rMsEl.textContent = `${Number(stLat.risk_paper_ms ?? cycleMs).toFixed(2)} ms`;
+
+        const l1FbEl = document.getElementById('node-laya1-fb');
+        const qFbEl = document.getElementById('node-qwen-fb');
+        const l2FbEl = document.getElementById('node-laya2-fb');
+        if (l1FbEl && fb1 && fb1.guidance) {
+          const tau = fb1.applied_drl_temperature !== undefined ? `τ=${Number(fb1.applied_drl_temperature).toFixed(2)}` : '';
+          const bias = fb1.conviction_bias !== undefined ? `bias=${Number(fb1.conviction_bias) >= 0 ? '+' : ''}${Number(fb1.conviction_bias).toFixed(2)}` : '';
+          l1FbEl.textContent = `Feedback Qwen (${tau} ${bias}): ${fb1.guidance}`;
+        }
+        if (qFbEl && (fb1.qwen_action || fb2.strictness_level)) {
+          qFbEl.textContent = `Feedback enviado ➔ Laya #1 (Δτ=${fb1.temperature_delta ?? 0}) & Laya #2 (${fb2.strictness_level || 'standard'})`;
+        }
+        if (l2FbEl && fb2 && fb2.focus_rule) {
+          l2FbEl.textContent = `Feedback Qwen: rigor ${fb2.strictness_level || 'standard'} (min coh ${(Number(fb2.min_coherence_threshold || 0.75) * 100).toFixed(0)}%) • ${fb2.focus_rule}`;
+        }
+
         if (latest) {
           const predPct = (latest.model_pred * 100).toFixed(4);
           document.getElementById('card-pred').textContent = `${latest.model_pred > 0 ? '+' : ''}${predPct}%`;
@@ -664,6 +1125,7 @@
           document.getElementById('node-risk-verdict').textContent = `Veredicto: ${latest.final_action} (${latest.risk_status})`;
           document.getElementById('node-risk-reason').textContent = latest.risk_reason || '--';
         }
+        if (typeof starSelectedIdx === 'number') updateStarHud(starSelectedIdx);
 
         // Decisions Table
         const tbody = document.getElementById('decisions-body');
@@ -717,7 +1179,337 @@
       }
     }
 
+    // =========================================================================
+    // MAPA DE CONSTELACIONES / ESTRELLAS (Paso de Información Multi-Agente)
+    // =========================================================================
+    const STAR_NODES = [
+      { id: 'market',  rx: 0.08, ry: 0.34, name: 'Mercado Público',       tag: 'BACK OFFICE',     color: '#38bdf8', r: 9 },
+      { id: 'ingest',  rx: 0.21, ry: 0.22, name: 'Ingesta & Idempotencia',tag: 'SQLITE WAL',      color: '#60a5fa', r: 8 },
+      { id: 'lstm',    rx: 0.34, ry: 0.42, name: 'LSTM T4 Alpha',         tag: 'FRONT OFFICE',    color: '#34d399', r: 10 },
+      { id: 'laya1',   rx: 0.47, ry: 0.23, name: 'Laya #1 (DRL Local)',   tag: 'DRL DUELING A2C', color: '#10b981', r: 10 },
+      { id: 'gateway', rx: 0.59, ry: 0.43, name: 'Auth Gateway',          tag: 'X-API-KEY',       color: '#818cf8', r: 8 },
+      { id: 'qwen',    rx: 0.71, ry: 0.24, name: 'Qwen 14B (API Ext.)',   tag: 'API EXTERNA',     color: '#38bdf8', r: 10 },
+      { id: 'laya2',   rx: 0.81, ry: 0.48, name: 'Laya #2 (Local)',       tag: 'MIDDLE OFFICE',   color: '#10b981', r: 10 },
+      { id: 'risk',    rx: 0.92, ry: 0.31, name: 'Risk Gate & Paper',     tag: 'HARD GATE',       color: '#fbbf24', r: 11 },
+      { id: 'veto',    rx: 0.86, ry: 0.79, name: 'Veto / Pausa Segura',   tag: 'ERROR_LOGS',      color: '#f43f5e', r: 8 },
+    ];
+
+    const STAR_EDGES = [
+      { from: 0, to: 1, step: 0, label: 'Velas OHLCV cerradas' },
+      { from: 1, to: 2, step: 1, label: 'Ventana sin leakage' },
+      { from: 2, to: 3, step: 2, label: 'r_hat + EMA + Vol' },
+      { from: 2, to: 6, step: 4, label: 'Métricas T4 directas' },
+      { from: 3, to: 4, step: 3, label: 'Régimen & convicción DRL' },
+      { from: 4, to: 5, step: 4, label: 'Payload autenticado' },
+      { from: 5, to: 3, step: 4.5, curve: -76, isFeedback: true, fbColor: '#f59e0b', label: 'Feedback Qwen ➔ Laya #1 (Δτ, bias)' },
+      { from: 5, to: 6, step: 4.9, curve: 48, isFeedback: true, fbColor: '#e879f9', label: 'Feedback Qwen ➔ Laya #2 (rigor)' },
+      { from: 5, to: 6, step: 5.2, label: 'Dictamen JSON estricto' },
+      { from: 6, to: 7, step: 6, label: 'Auditoría OK' },
+      { from: 6, to: 8, step: 6, label: 'Alerta / Veto', isVeto: true },
+      { from: 7, to: 8, step: 7, label: 'Límite violado', isVeto: true },
+    ];
+
+    const BG_STARS = Array.from({ length: 95 }, (_, idx) => ({
+      x: ((idx * 173 + 31) % 997) / 997,
+      y: ((idx * 317 + 71) % 991) / 991,
+      size: (idx % 3 === 0) ? 1.8 : 1.0,
+      phase: idx * 0.65,
+    }));
+
+    let starPulseStart = performance.now();
+    let starHoveredIdx = -1;
+    let starSelectedIdx = 2;
+    let lastRenderBadgeAt = 0;
+
+    function getStarLatencyMs(nodeId) {
+      const lat = (latestStatusData?.stage_latencies_ms && Object.keys(latestStatusData.stage_latencies_ms).length)
+        ? latestStatusData.stage_latencies_ms
+        : (latestDecisionData?.qwen_json?.stage_latencies_ms || {});
+      switch (nodeId) {
+        case 'market':  return latestStatusData?._client_sync_ms ?? null;
+        case 'ingest':  return lat.ingest_ms ?? null;
+        case 'lstm':    return lat.lstm_ms ?? null;
+        case 'laya1':   return lat.laya1_ms ?? latestDecisionData?.laya1_json?.latency_ms ?? null;
+        case 'gateway': return 0.1;
+        case 'qwen':    return lat.qwen_ms ?? latestDecisionData?.qwen_json?.latency_ms ?? null;
+        case 'laya2':   return lat.laya2_ms ?? latestDecisionData?.laya2_json?.latency_ms ?? null;
+        case 'risk':    return lat.risk_paper_ms ?? lat.total_cycle_ms ?? latestDecisionData?.latency_ms ?? null;
+        default:        return null;
+      }
+    }
+
+    function getStarDetailPayload(nodeId) {
+      const sym = latestStatusData?.active_ticker || tickerSelect.value || 'BTC-USD';
+      const tf = currentInterval;
+      const af = latestChartPayload?.agent_forecast;
+      const dec = latestDecisionData;
+      const fb1 = (latestStatusData?.laya1_feedback && Object.keys(latestStatusData.laya1_feedback).length)
+        ? latestStatusData.laya1_feedback
+        : (dec?.qwen_json?.orchestrator_feedback?.to_laya1 || {});
+      const fb2 = (latestStatusData?.laya2_feedback && Object.keys(latestStatusData.laya2_feedback).length)
+        ? latestStatusData.laya2_feedback
+        : (dec?.qwen_json?.orchestrator_feedback?.to_laya2 || {});
+      const latMs = getStarLatencyMs(nodeId);
+      const msTxt = latMs !== null && latMs !== undefined ? `${Number(latMs).toFixed(2)} ms` : '-- ms';
+      const eq = latestStatusData?.portfolio?.total_equity ?? 50000;
+      const rHat = af ? `${af.pred_return_pct >= 0 ? '+' : ''}${Number(af.pred_return_pct).toFixed(3)}%` : (dec ? `${(dec.model_pred * 100).toFixed(3)}%` : '--');
+
+      switch (nodeId) {
+        case 'market':
+          return `Símbolo: ${sym} | TF: ${tf} | Sync: ${msTxt} | Cierre: $${latestChartPayload?.last_close?.toLocaleString() || '--'}`;
+        case 'ingest':
+          return `Velas SQLite WAL: ${latestStatusData?.processed_candles_count ?? 0} | Ingesta: ${msTxt}`;
+        case 'lstm':
+          return `r_hat(${tf === '1h' ? '+1H' : '+1D'}): ${rHat} | Vol_20: ${af?.vol_20 ?? '--'} | LSTM: ${msTxt}`;
+        case 'laya1':
+          return `Régimen: ${af?.regime || dec?.laya1_json?.regime || '--'} | DRL: ${msTxt} | Feedback Qwen (Δτ=${fb1.temperature_delta ?? 0}, bias=${fb1.conviction_bias ?? 0}): ${fb1.guidance || '--'}`;
+        case 'gateway':
+          return `Validación X-API-Key / HttpOnly | Verificación: ${msTxt}`;
+        case 'qwen':
+          return `Acción: ${dec?.qwen_json?.action || af?.signal_action || 'HOLD'} | Qwen: ${msTxt} | Envía feedback a Laya #1 y #2`;
+        case 'laya2':
+          return `Seguridad: ${dec?.laya2_json?.security_status || 'SAFE'} | Guardia: ${msTxt} | Feedback rigor=${fb2.strictness_level || 'standard'} (coh≥${fb2.min_coherence_threshold ?? 0.75})`;
+        case 'risk':
+          return `Veredicto: ${dec?.final_action || 'HOLD'} (${dec?.risk_status || 'APPROVED'}) | Equity: $${Number(eq).toLocaleString()} | Risk+Paper: ${msTxt}`;
+        case 'veto':
+          return `Kill-Switch: ${latestStatusData?.system_status || 'RUNNING'} | Cero órdenes reales`;
+        default:
+          return '';
+      }
+    }
+
+    function updateStarHud(idx) {
+      const node = STAR_NODES[idx];
+      if (!node) return;
+      document.getElementById('star-hud-badge').textContent = node.tag;
+      document.getElementById('star-hud-title').textContent = `★ ${node.name}`;
+      document.getElementById('star-hud-detail').textContent = getStarDetailPayload(node.id);
+    }
+
+    function triggerStarPulse() {
+      starPulseStart = performance.now();
+    }
+
+    function initStarConstellation() {
+      const canvas = document.getElementById('star-constellation-canvas');
+      if (!canvas) return;
+      const ctx = canvas.getContext('2d');
+
+      const resizeCanvas = () => {
+        const rect = canvas.parentElement.getBoundingClientRect();
+        canvas.width = Math.max(320, Math.floor(rect.width));
+        canvas.height = 440;
+      };
+      resizeCanvas();
+      window.addEventListener('resize', resizeCanvas);
+
+      canvas.addEventListener('mousemove', ev => {
+        const rect = canvas.getBoundingClientRect();
+        const mx = ev.clientX - rect.left;
+        const my = ev.clientY - rect.top;
+        let found = -1;
+        STAR_NODES.forEach((n, i) => {
+          const nx = n.rx * canvas.width;
+          const ny = n.ry * canvas.height;
+          if (Math.hypot(mx - nx, my - ny) <= 24) found = i;
+        });
+        starHoveredIdx = found;
+        if (found !== -1) updateStarHud(found);
+      });
+
+      canvas.addEventListener('click', ev => {
+        const rect = canvas.getBoundingClientRect();
+        const mx = ev.clientX - rect.left;
+        const my = ev.clientY - rect.top;
+        STAR_NODES.forEach((n, i) => {
+          const nx = n.rx * canvas.width;
+          const ny = n.ry * canvas.height;
+          if (Math.hypot(mx - nx, my - ny) <= 26) {
+            starSelectedIdx = i;
+            updateStarHud(i);
+            triggerStarPulse();
+          }
+        });
+      });
+
+      function drawFrame(now) {
+        const tFrame0 = performance.now();
+        const w = canvas.width;
+        const h = canvas.height;
+        ctx.clearRect(0, 0, w, h);
+
+        // Cielo nocturno y nebulosa sutil
+        const bgGrad = ctx.createRadialGradient(w * 0.5, h * 0.4, 20, w * 0.5, h * 0.5, w * 0.75);
+        bgGrad.addColorStop(0, '#090f2b');
+        bgGrad.addColorStop(0.55, '#040819');
+        bgGrad.addColorStop(1, '#02040d');
+        ctx.fillStyle = bgGrad;
+        ctx.fillRect(0, 0, w, h);
+
+        // Estrellas de fondo parpadeantes
+        BG_STARS.forEach(s => {
+          const alpha = 0.22 + 0.35 * (0.5 + 0.5 * Math.sin(now * 0.0018 + s.phase));
+          ctx.fillStyle = `rgba(226, 232, 240, ${alpha.toFixed(2)})`;
+          ctx.beginPath();
+          ctx.arc(s.x * w, s.y * h, s.size, 0, Math.PI * 2);
+          ctx.fill();
+        });
+
+        // Progreso cíclico del pulso (0..8 pasos cada 5.6s)
+        const elapsedSec = ((now - starPulseStart) / 1000.0) % 5.6;
+        const activeStep = (elapsedSec / 5.6) * 7.5;
+        const isVetoed = latestDecisionData?.risk_status === 'REJECTED' || latestStatusData?.system_status === 'STOPPED';
+
+        const quadPoint = (x1, y1, cx, cy, x2, y2, t) => {
+          const mt = 1 - t;
+          return {
+            x: mt * mt * x1 + 2 * mt * t * cx + t * t * x2,
+            y: mt * mt * y1 + 2 * mt * t * cy + t * t * y2,
+          };
+        };
+
+        // Dibujar aristas de constelación, lazos de feedback curvos y cometas de datos
+        STAR_EDGES.forEach(edge => {
+          const a = STAR_NODES[edge.from];
+          const b = STAR_NODES[edge.to];
+          const x1 = a.rx * w, y1 = a.ry * h;
+          const x2 = b.rx * w, y2 = b.ry * h;
+          const hasCurve = typeof edge.curve === 'number';
+          const cx = (x1 + x2) * 0.5;
+          const cy = (y1 + y2) * 0.5 + (edge.curve || 0);
+
+          ctx.save();
+          if (edge.isFeedback) {
+            ctx.setLineDash([5, 4]);
+            ctx.strokeStyle = edge.fbColor === '#e879f9' ? 'rgba(232, 121, 249, 0.55)' : 'rgba(245, 158, 11, 0.55)';
+            ctx.lineWidth = 2.0;
+          } else if (edge.isVeto) {
+            ctx.setLineDash([4, 5]);
+            ctx.strokeStyle = isVetoed ? 'rgba(244, 63, 94, 0.55)' : 'rgba(244, 63, 94, 0.16)';
+            ctx.lineWidth = 1.6;
+          } else {
+            ctx.strokeStyle = 'rgba(129, 140, 248, 0.28)';
+            ctx.lineWidth = 1.6;
+          }
+          ctx.beginPath();
+          ctx.moveTo(x1, y1);
+          if (hasCurve) {
+            ctx.quadraticCurveTo(cx, cy, x2, y2);
+          } else {
+            ctx.lineTo(x2, y2);
+          }
+          ctx.stroke();
+
+          if (edge.isFeedback) {
+            const mid = quadPoint(x1, y1, cx, cy, x2, y2, 0.5);
+            ctx.fillStyle = edge.fbColor || '#f59e0b';
+            ctx.font = 'bold 10px monospace';
+            ctx.textAlign = 'center';
+            ctx.fillText(edge.from === 5 && edge.to === 3 ? 'Feedback DRL (Δτ, bias)' : 'Feedback Guardia (rigor)', mid.x, mid.y - 6);
+          }
+          ctx.restore();
+
+          // Cometa luminoso recorriendo esta arista en su paso correspondiente
+          const shouldPulse = edge.isVeto ? isVetoed : true;
+          const localProg = activeStep - edge.step;
+          if (shouldPulse && localProg >= 0 && localProg <= 1.0) {
+            const p = hasCurve
+              ? quadPoint(x1, y1, cx, cy, x2, y2, localProg)
+              : { x: x1 + (x2 - x1) * localProg, y: y1 + (y2 - y1) * localProg };
+            const tTail = Math.max(0, localProg - 0.18);
+            const tail = hasCurve
+              ? quadPoint(x1, y1, cx, cy, x2, y2, tTail)
+              : { x: x1 + (x2 - x1) * tTail, y: y1 + (y2 - y1) * tTail };
+            const cometColor = edge.isFeedback ? (edge.fbColor || '#f59e0b') : (edge.isVeto ? '#fb7185' : b.color);
+
+            const grad = ctx.createLinearGradient(tail.x, tail.y, p.x, p.y);
+            grad.addColorStop(0, 'rgba(255,255,255,0)');
+            grad.addColorStop(1, cometColor);
+            ctx.strokeStyle = grad;
+            ctx.lineWidth = 3.2;
+            ctx.beginPath();
+            ctx.moveTo(tail.x, tail.y);
+            ctx.lineTo(p.x, p.y);
+            ctx.stroke();
+
+            ctx.fillStyle = '#ffffff';
+            ctx.shadowColor = cometColor;
+            ctx.shadowBlur = 12;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, 3.8, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.shadowBlur = 0;
+          }
+        });
+
+        // Dibujar estrellas principales
+        STAR_NODES.forEach((n, idx) => {
+          const x = n.rx * w;
+          const y = n.ry * h;
+          const isFocus = idx === starHoveredIdx || idx === starSelectedIdx;
+          const stepHit = Math.max(0, 1 - Math.abs(activeStep - idx) * 1.1);
+          const haloR = n.r * (2.1 + stepHit * 1.4 + (isFocus ? 0.9 : 0));
+
+          const halo = ctx.createRadialGradient(x, y, 2, x, y, haloR);
+          halo.addColorStop(0, n.color + 'cc');
+          halo.addColorStop(0.5, n.color + '33');
+          halo.addColorStop(1, 'rgba(0,0,0,0)');
+          ctx.fillStyle = halo;
+          ctx.beginPath();
+          ctx.arc(x, y, haloR, 0, Math.PI * 2);
+          ctx.fill();
+
+          // Estrella central brillante
+          ctx.fillStyle = '#f8fafc';
+          ctx.shadowColor = n.color;
+          ctx.shadowBlur = isFocus ? 18 : 10;
+          ctx.beginPath();
+          ctx.arc(x, y, n.r * (isFocus ? 0.85 : 0.72), 0, Math.PI * 2);
+          ctx.fill();
+          ctx.shadowBlur = 0;
+
+          // Anillo exterior si seleccionada
+          if (isFocus) {
+            ctx.strokeStyle = n.color;
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.arc(x, y, n.r + 5, 0, Math.PI * 2);
+            ctx.stroke();
+          }
+
+          // Etiquetas + latencia en ms por estrella
+          ctx.textAlign = 'center';
+          ctx.fillStyle = '#f1f5f9';
+          ctx.font = 'bold 11px system-ui, sans-serif';
+          ctx.fillText(n.name, x, y + n.r + 18);
+          ctx.fillStyle = n.color;
+          ctx.font = '10px monospace';
+          ctx.fillText(n.tag, x, y + n.r + 31);
+
+          const msVal = getStarLatencyMs(n.id);
+          if (msVal !== null && msVal !== undefined) {
+            ctx.fillStyle = '#cbd5e1';
+            ctx.font = 'bold 10px monospace';
+            ctx.fillText(`${Number(msVal).toFixed(2)} ms`, x, y + n.r + 44);
+          }
+        });
+
+        const frameRenderMs = performance.now() - tFrame0;
+        if (now - lastRenderBadgeAt > 250) {
+          lastRenderBadgeAt = now;
+          const renderBadge = document.getElementById('badge-render-ms');
+          if (renderBadge) renderBadge.textContent = `Render Mapa: ${frameRenderMs.toFixed(2)} ms`;
+        }
+
+        requestAnimationFrame(drawFrame);
+      }
+
+      updateStarHud(starSelectedIdx);
+      requestAnimationFrame(drawFrame);
+    }
+
     // Initial load and periodic refresh
+    initStarConstellation();
     refreshDashboard();
     loadBenchmark();
     setInterval(refreshDashboard, 5000);

@@ -8,14 +8,16 @@
       "is_local_device": false,
       "location_label": "API EXTERNA (No Local)",
       "endpoint": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
-      "model": "qwen2.5-14b-instruct"
+      "model": "qwen2.5-14b-instruct",
+      "vram_budget_gb": null,
+      "num_ctx": null
     },
     "laya_alpha": {
       "execution_mode": "LOCAL_DEVICE",
       "is_local_device": true,
-      "location_label": "DISPOSITIVO LOCAL (Ollama /v1/systemone)",
+      "location_label": "DISPOSITIVO LOCAL (DRL Dueling A2C + Ollama /v1/systemone)",
       "endpoint": "http://127.0.0.1:11434/v1/systemone",
-      "model": "laya:latest"
+      "model": "laya:latest + laya1_drl_v1"
     },
     "laya_guard": {
       "execution_mode": "LOCAL_DEVICE",
@@ -35,20 +37,20 @@
       "win_rate": "No definido",
       "closed_trades": 0,
       "total_orders": 0,
-      "avg_latency_ms": 5.23,
+      "avg_latency_ms": 4.67,
       "rejected_actions": 1
     },
     {
       "strategy": "2_Agente_DualLaya_Qwen",
       "initial_capital": 50000.0,
-      "final_equity": 50000.0,
-      "net_return_pct": 0.0,
-      "max_drawdown_pct": 0.0,
-      "win_rate": "No definido",
-      "closed_trades": 0,
-      "total_orders": 0,
-      "avg_latency_ms": 63.61,
-      "rejected_actions": 0
+      "final_equity": 38852.42,
+      "net_return_pct": -22.2952,
+      "max_drawdown_pct": 22.6787,
+      "win_rate": 0.0,
+      "closed_trades": 1,
+      "total_orders": 2,
+      "avg_latency_ms": 473.38,
+      "rejected_actions": 1
     },
     {
       "strategy": "3_Buy_And_Hold",
@@ -63,5 +65,5 @@
       "rejected_actions": 0
     }
   ],
-  "interpretation": "En la ventana evaluada de 25 ciclos sobre BTC-USD, la capa LLM/Laya obtuvo retorno +0.00% (vs +0.00% sin LLM y -27.27% Buy & Hold) con mayor latencia (63.6 ms), priorizando preservación de capital y trazabilidad auditable."
+  "interpretation": "En la ventana evaluada de 25 ciclos sobre BTC-USD, la capa LLM/Laya obtuvo retorno -22.30% (vs +0.00% sin LLM y -27.27% Buy & Hold) con mayor latencia (473.4 ms), priorizando preservación de capital y trazabilidad auditable."
 }
