@@ -1,0 +1,726 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Quant Multi-Agent Trader | Dashboard</title>
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- TradingView Lightweight Charts v4.2.0 -->
+  <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+  <style>
+    body { background-color: #030712; color: #f3f4f6; font-family: system-ui, -apple-system, sans-serif; }
+  </style>
+</head>
+<body class="p-4 md:p-8">
+  <div class="max-w-7xl mx-auto space-y-6">
+    
+    <!-- Header -->
+    <header class="flex flex-wrap items-center justify-between gap-4 border-b border-gray-800 pb-4">
+      <div>
+        <h1 class="text-2xl font-bold tracking-tight text-white flex items-center gap-3">
+          <span class="inline-block w-3 h-3 rounded-full bg-emerald-500 animate-pulse"></span>
+          Quant Multi-Agent Trader • Dashboard
+        </h1>
+        <p class="text-xs text-gray-400 mt-1">
+          Front Office (LSTM T4 + Dual Laya Local) ➔ Middle Office (Risk Hard Gate) ➔ Back Office (Paper + SQLite WAL)
+        </p>
+      </div>
+      <div class="flex items-center gap-2">
+        <span id="status-badge" class="px-3 py-1 rounded-full text-xs font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
+          Estado: RUNNING
+        </span>
+        <span class="px-3 py-1 rounded-full text-xs font-semibold bg-cyan-500/20 text-cyan-300 border border-cyan-500/40">
+          30 Tickers Activos
+        </span>
+      </div>
+    </header>
+
+    <!-- Control Panel -->
+    <section class="rounded-xl border border-gray-800 bg-gray-900/80 p-5 shadow-lg space-y-4">
+      <div class="flex flex-wrap items-center justify-between gap-4 border-b border-gray-800 pb-4">
+        <!-- Auth -->
+        <div class="flex items-center gap-2">
+          <label class="text-xs text-gray-400 font-medium">Clave / Token:</label>
+          <input type="password" id="gateway-key" value="dev_local_gateway_key_change_me" class="bg-gray-950 border border-gray-700 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-sky-500" placeholder="GATEWAY_API_KEY">
+          <span class="text-[11px] text-gray-500">(Para Iniciar/Pausar/Detener/Replay)</span>
+        </div>
+
+        <!-- Ticker Selector -->
+        <div class="flex items-center gap-3">
+          <label class="text-xs font-medium text-gray-400">Activo (30 Tickers):</label>
+          <select id="ticker-select" class="bg-gray-950 border border-gray-700 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-sky-500">
+            <!-- Populated via JS -->
+          </select>
+          <select id="mode-select" class="bg-gray-950 border border-gray-700 rounded-lg px-3 py-1.5 text-xs text-white">
+            <option value="replay">Historical Replay</option>
+            <option value="live">Live Market (MEXC)</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Action Buttons -->
+      <div class="flex flex-wrap items-center justify-between gap-3">
+        <div class="flex flex-wrap items-center gap-2">
+          <button onclick="controlAction('start')" class="bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold px-4 py-2 rounded-lg transition">Iniciar</button>
+          <button onclick="controlAction('pause')" class="bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold px-4 py-2 rounded-lg transition">Pausar</button>
+          <button onclick="controlAction('stop')" class="bg-rose-600 hover:bg-rose-500 text-white text-xs font-semibold px-4 py-2 rounded-lg transition">Detener (Kill-Switch)</button>
+        </div>
+
+        <div class="flex flex-wrap items-center gap-2">
+          <button onclick="controlAction('step')" class="bg-sky-600 hover:bg-sky-500 text-white text-xs font-semibold px-4 py-2 rounded-lg transition flex items-center gap-1">
+            <span>⚡</span> Ejecutar 1 Ciclo
+          </button>
+          <button onclick="runReplayBatch(25)" class="bg-violet-600 hover:bg-violet-500 text-white text-xs font-semibold px-4 py-2 rounded-lg transition flex items-center gap-1">
+            <span>🔄</span> Replay 25 Ciclos
+          </button>
+          <button onclick="loadBenchmark()" class="bg-gray-800 hover:bg-gray-700 text-gray-200 border border-gray-700 text-xs font-semibold px-4 py-2 rounded-lg transition">
+            Benchmark 3 Carriles
+          </button>
+        </div>
+      </div>
+      <div id="action-feedback" class="text-xs text-sky-400 hidden"></div>
+    </section>
+
+    <!-- Market & Prediction Overview -->
+    <section class="grid grid-cols-1 md:grid-cols-4 gap-4">
+      <div class="rounded-xl border border-gray-800 bg-gray-900/80 p-4">
+        <p class="text-xs uppercase text-gray-400">Activo Activo</p>
+        <p id="card-symbol" class="text-2xl font-bold text-white mt-1">BTC-USD</p>
+        <p id="card-price" class="text-sm font-semibold text-sky-400 mt-1">Precio: --</p>
+      </div>
+      <div class="rounded-xl border border-gray-800 bg-gray-900/80 p-4">
+        <p class="text-xs uppercase text-gray-400">Pronóstico LSTM T4 (r_hat)</p>
+        <p id="card-pred" class="text-2xl font-bold text-emerald-400 mt-1">--</p>
+        <p id="card-close-utc" class="text-xs text-gray-500 mt-1 truncate">Vela: --</p>
+      </div>
+      <div class="rounded-xl border border-gray-800 bg-gray-900/80 p-4">
+        <p class="text-xs uppercase text-gray-400">Patrimonio Total</p>
+        <p id="card-equity" class="text-2xl font-bold text-white mt-1">$50,000.00</p>
+        <p id="card-cash" class="text-xs text-gray-400 mt-1">Efectivo: $50,000.00</p>
+      </div>
+      <div class="rounded-xl border border-gray-800 bg-gray-900/80 p-4">
+        <p class="text-xs uppercase text-gray-400">Posición & Drawdown</p>
+        <p id="card-pos" class="text-2xl font-bold text-sky-300 mt-1">0.0000</p>
+        <p id="card-dd" class="text-xs text-amber-300 mt-1">Max DD: 0.00%</p>
+      </div>
+    </section>
+
+    <!-- Gráfica Interactiva del Ticker -->
+    <section class="rounded-xl border border-gray-800 bg-gray-900/80 p-5 shadow-lg space-y-3">
+      <div class="flex flex-wrap items-center justify-between gap-3 border-b border-gray-800 pb-3">
+        <div class="flex flex-wrap items-center gap-3">
+          <h3 id="chart-symbol" class="text-base font-bold text-white">Gráfica: BTC-USD</h3>
+          <span id="chart-last-price" class="text-sm font-mono font-semibold text-sky-300">--</span>
+          <span id="chart-change-badge" class="px-2 py-0.5 rounded text-xs font-semibold bg-gray-800 text-gray-300">--</span>
+          <span id="chart-range" class="text-xs text-gray-400">Rango: --</span>
+          <span id="chart-source-badge" class="px-2 py-0.5 rounded text-[10px] font-mono bg-violet-500/20 text-violet-300 border border-violet-500/30">replay</span>
+        </div>
+
+        <div class="flex flex-wrap items-center gap-3 text-xs">
+          <!-- Tipo de Gráfica -->
+          <div class="flex rounded-lg border border-gray-700 overflow-hidden">
+            <button id="btn-type-candles" type="button" onclick="setChartType('candles')" class="px-2.5 py-1 font-medium bg-sky-600 text-white">Velas (OHLC)</button>
+            <button id="btn-type-line" type="button" onclick="setChartType('line')" class="px-2.5 py-1 font-medium bg-gray-950 text-gray-400 hover:text-white">Línea</button>
+          </div>
+
+          <!-- Rango Temporal -->
+          <div class="flex rounded-lg border border-gray-700 overflow-hidden">
+            <button id="btn-range-30" type="button" onclick="setChartRange(30)" class="px-2.5 py-1 font-medium bg-gray-950 text-gray-400 hover:text-white">30D</button>
+            <button id="btn-range-60" type="button" onclick="setChartRange(60)" class="px-2.5 py-1 font-medium bg-gray-950 text-gray-400 hover:text-white">60D</button>
+            <button id="btn-range-140" type="button" onclick="setChartRange(140)" class="px-2.5 py-1 font-medium bg-sky-600 text-white">140D</button>
+          </div>
+
+          <!-- Capas -->
+          <label class="flex items-center gap-1 cursor-pointer text-amber-300">
+            <input type="checkbox" id="chk-ema10" checked onchange="renderChartFromState()" class="accent-amber-400"> EMA 10
+          </label>
+          <label class="flex items-center gap-1 cursor-pointer text-sky-300">
+            <input type="checkbox" id="chk-ema20" checked onchange="renderChartFromState()" class="accent-sky-400"> EMA 20
+          </label>
+          <label class="flex items-center gap-1 cursor-pointer text-gray-300">
+            <input type="checkbox" id="chk-volume" checked onchange="renderChartFromState()" class="accent-gray-400"> Volumen
+          </label>
+        </div>
+      </div>
+
+      <div id="chart-ohlc-legend" class="text-[11px] font-mono text-gray-400 flex flex-wrap gap-4">
+        <span>Mueve el cursor sobre la gráfica para inspeccionar OHLCV, EMA 10 y EMA 20</span>
+      </div>
+
+      <div id="ticker-chart-container" class="w-full rounded-lg border border-gray-800 bg-gray-950/90 overflow-hidden" style="height: 380px;"></div>
+    </section>
+
+    <!-- Constelación de Agentes -->
+    <section class="rounded-xl border border-gray-800 bg-gray-900/80 p-5 space-y-3">
+      <h3 class="text-sm font-semibold text-gray-300 uppercase tracking-wider">Constelación de Agentes Activa</h3>
+      <div class="grid grid-cols-1 md:grid-cols-4 gap-3">
+        
+        <!-- Laya #1 -->
+        <div class="p-3 bg-gray-950/80 border border-emerald-500/30 rounded-lg">
+          <div class="flex items-center justify-between">
+            <span class="text-xs font-bold text-emerald-400">1. Laya #1 (Alpha)</span>
+            <span class="text-[10px] bg-emerald-500/20 text-emerald-300 px-1.5 py-0.5 rounded font-mono">LOCAL</span>
+          </div>
+          <p id="node-laya1-regime" class="text-xs text-gray-200 mt-2 font-medium">Régimen: --</p>
+          <p id="node-laya1-signal" class="text-xs text-gray-400">Señal: --</p>
+          <p id="node-laya1-conv" class="text-[11px] text-gray-500">Convicción: --</p>
+        </div>
+
+        <!-- Orquestador -->
+        <div class="p-3 bg-gray-950/80 border border-sky-500/30 rounded-lg">
+          <div class="flex items-center justify-between">
+            <span class="text-xs font-bold text-sky-400">2. Orquestador</span>
+            <span class="text-[10px] bg-sky-500/20 text-sky-300 px-1.5 py-0.5 rounded font-mono">SYSTEM-2</span>
+          </div>
+          <p id="node-qwen-action" class="text-xs text-gray-200 mt-2 font-bold">Propuesta: --</p>
+          <p id="node-qwen-just" class="text-[11px] text-gray-400 line-clamp-2 mt-1">--</p>
+        </div>
+
+        <!-- Laya #2 -->
+        <div class="p-3 bg-gray-950/80 border border-emerald-500/30 rounded-lg">
+          <div class="flex items-center justify-between">
+            <span class="text-xs font-bold text-emerald-400">3. Laya #2 (Guardia)</span>
+            <span class="text-[10px] bg-emerald-500/20 text-emerald-300 px-1.5 py-0.5 rounded font-mono">LOCAL</span>
+          </div>
+          <p id="node-laya2-sec" class="text-xs text-gray-200 mt-2">Seguridad: --</p>
+          <p id="node-laya2-coh" class="text-xs text-gray-400">Coherencia: --</p>
+        </div>
+
+        <!-- Risk Gate -->
+        <div class="p-3 bg-gray-950/80 border border-amber-500/30 rounded-lg">
+          <div class="flex items-center justify-between">
+            <span class="text-xs font-bold text-amber-400">4. Motor de Riesgo</span>
+            <span class="text-[10px] bg-amber-500/20 text-amber-300 px-1.5 py-0.5 rounded font-mono">HARD GATE</span>
+          </div>
+          <p id="node-risk-verdict" class="text-xs text-gray-200 mt-2 font-bold">Veredicto: --</p>
+          <p id="node-risk-reason" class="text-[11px] text-gray-400 line-clamp-2 mt-1">--</p>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- Benchmark 3 Carriles (Capítulo 16) -->
+    <section id="benchmark-section" class="rounded-xl border border-gray-800 bg-gray-900/80 p-5 space-y-3">
+      <div class="flex items-center justify-between">
+        <h3 class="text-sm font-semibold text-gray-300 uppercase tracking-wider">Benchmark Comparativo 3 Carriles (Cap. 16)</h3>
+        <span id="bm-meta" class="text-xs text-gray-500">25 Ciclos Evaluados</span>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full text-xs text-left">
+          <thead class="border-b border-gray-800 text-gray-400">
+            <tr>
+              <th class="py-2">Estrategia</th>
+              <th class="py-2">Patrimonio Final</th>
+              <th class="py-2">Retorno Neto</th>
+              <th class="py-2">Max Drawdown</th>
+              <th class="py-2">Win Rate</th>
+              <th class="py-2">Órdenes</th>
+              <th class="py-2">Latencia Prom.</th>
+            </tr>
+          </thead>
+          <tbody id="benchmark-body" class="divide-y divide-gray-800 text-gray-200">
+            <!-- Populated via JS -->
+          </tbody>
+        </table>
+      </div>
+      <p id="bm-interpretation" class="text-xs text-gray-400 bg-gray-950 p-3 rounded-lg border border-gray-800"></p>
+    </section>
+
+    <!-- Historial de Decisiones (SQLite WAL) -->
+    <section class="rounded-xl border border-gray-800 bg-gray-900/80 p-5 space-y-3">
+      <h3 class="text-sm font-semibold text-gray-300 uppercase tracking-wider">Bitácora de Decisiones (SQLite WAL)</h3>
+      <div class="overflow-x-auto max-h-80 overflow-y-auto">
+        <table class="w-full text-xs text-left">
+          <thead class="sticky top-0 bg-gray-900 border-b border-gray-800 text-gray-400">
+            <tr>
+              <th class="py-2">Fecha Vela UTC</th>
+              <th class="py-2">Ticker</th>
+              <th class="py-2">Modo</th>
+              <th class="py-2">r_hat (T4)</th>
+              <th class="py-2">Laya #1</th>
+              <th class="py-2">Propuesta</th>
+              <th class="py-2">Acción Final</th>
+              <th class="py-2">Latencia</th>
+            </tr>
+          </thead>
+          <tbody id="decisions-body" class="divide-y divide-gray-800 text-gray-300">
+            <!-- Populated via JS -->
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+  </div>
+
+  <script>
+    const API_BASE = '';
+    const PRIMARY_TICKERS = [
+      'AAPL', 'MSFT', 'NVDA', 'TSLA', 'HWM', 'JPM', 'GOOGL', 'AMZN', 'META', 'LMT',
+      'WM', 'LULU', 'DIS', 'V', 'MA', 'BTC-USD', 'SPY', 'QQQ', 'NFLX', 'AMD',
+      'CRM', 'ADBE', 'PYPL', 'COST', 'HD', 'UNH', 'JNJ', 'PG', 'KO', 'WMT'
+    ];
+
+    let initialSyncDone = false;
+    let currentChartType = 'candles';
+    let currentChartLimit = 140;
+    let latestChartPayload = null;
+    let lwChart = null;
+    let lwResizeObserver = null;
+
+    // Initialize select options
+    const tickerSelect = document.getElementById('ticker-select');
+    PRIMARY_TICKERS.forEach(t => {
+      const opt = document.createElement('option');
+      opt.value = t;
+      opt.textContent = t;
+      if (t === 'BTC-USD') opt.selected = true;
+      tickerSelect.appendChild(opt);
+    });
+
+    tickerSelect.addEventListener('change', () => {
+      const chosen = tickerSelect.value;
+      loadTickerChart(chosen);
+      controlAction('switch_ticker', { symbol: chosen });
+    });
+
+    document.getElementById('mode-select').addEventListener('change', () => {
+      const chosenMode = document.getElementById('mode-select').value;
+      controlAction('switch_mode', { mode: chosenMode }).then(() => loadTickerChart(tickerSelect.value));
+    });
+
+    function showFeedback(msg, isError = false) {
+      const el = document.getElementById('action-feedback');
+      el.textContent = msg;
+      el.className = `text-xs ${isError ? 'text-rose-400' : 'text-sky-400'}`;
+      el.classList.remove('hidden');
+      setTimeout(() => el.classList.add('hidden'), 4000);
+    }
+
+    function setChartType(type) {
+      currentChartType = type;
+      document.getElementById('btn-type-candles').className = `px-2.5 py-1 font-medium ${type === 'candles' ? 'bg-sky-600 text-white' : 'bg-gray-950 text-gray-400 hover:text-white'}`;
+      document.getElementById('btn-type-line').className = `px-2.5 py-1 font-medium ${type === 'line' ? 'bg-sky-600 text-white' : 'bg-gray-950 text-gray-400 hover:text-white'}`;
+      renderChartFromState();
+    }
+
+    function setChartRange(days) {
+      currentChartLimit = days;
+      [30, 60, 140].forEach(d => {
+        document.getElementById(`btn-range-${d}`).className = `px-2.5 py-1 font-medium ${days === d ? 'bg-sky-600 text-white' : 'bg-gray-950 text-gray-400 hover:text-white'}`;
+      });
+      loadTickerChart(tickerSelect.value);
+    }
+
+    function updateOhlcLegend(candle) {
+      const leg = document.getElementById('chart-ohlc-legend');
+      if (!candle) return;
+      const isUp = candle.close >= candle.open;
+      const col = isUp ? 'text-emerald-400' : 'text-rose-400';
+      leg.innerHTML = `
+        <span class="text-gray-300">${candle.time}</span>
+        <span>O: <strong class="${col}">${Number(candle.open).toLocaleString()}</strong></span>
+        <span>H: <strong class="${col}">${Number(candle.high).toLocaleString()}</strong></span>
+        <span>L: <strong class="${col}">${Number(candle.low).toLocaleString()}</strong></span>
+        <span>C: <strong class="${col}">${Number(candle.close).toLocaleString()}</strong></span>
+        <span>Vol: <strong class="text-gray-300">${Number(candle.volume).toLocaleString()}</strong></span>
+        <span class="text-amber-300">EMA10: ${Number(candle.ema10).toLocaleString()}</span>
+        <span class="text-sky-300">EMA20: ${Number(candle.ema20).toLocaleString()}</span>
+      `;
+    }
+
+    function renderCanvasFallback(container, payload, showEma10, showEma20) {
+      container.innerHTML = '';
+      const canvas = document.createElement('canvas');
+      canvas.width = container.clientWidth || 900;
+      canvas.height = 380;
+      container.appendChild(canvas);
+      const ctx = canvas.getContext('2d');
+      const candles = payload.candles || [];
+      if (!candles.length) return;
+
+      const pad = { top: 20, right: 60, bottom: 28, left: 16 };
+      const w = canvas.width - pad.left - pad.right;
+      const h = canvas.height - pad.top - pad.bottom;
+
+      const vals = candles.flatMap(c => [c.low, c.high, c.ema10, c.ema20]);
+      const minV = Math.min(...vals);
+      const maxV = Math.max(...vals);
+      const span = Math.max(maxV - minV, 1e-6);
+
+      const toX = i => pad.left + (candles.length > 1 ? (i / (candles.length - 1)) * w : w / 2);
+      const toY = v => pad.top + h - ((v - minV) / span) * h;
+
+      ctx.fillStyle = '#030712';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      // Grid horizontal
+      ctx.strokeStyle = '#1f2937';
+      ctx.lineWidth = 1;
+      for (let g = 0; g <= 4; g++) {
+        const y = pad.top + (g / 4) * h;
+        ctx.beginPath();
+        ctx.moveTo(pad.left, y);
+        ctx.lineTo(canvas.width - pad.right, y);
+        ctx.stroke();
+        const priceLabel = (maxV - (g / 4) * span).toFixed(2);
+        ctx.fillStyle = '#9ca3af';
+        ctx.font = '11px monospace';
+        ctx.fillText(priceLabel, canvas.width - pad.right + 6, y + 4);
+      }
+
+      if (currentChartType === 'candles') {
+        const cw = Math.max(2, (w / candles.length) * 0.6);
+        candles.forEach((c, i) => {
+          const x = toX(i);
+          const color = c.close >= c.open ? '#10b981' : '#f43f5e';
+          ctx.strokeStyle = color;
+          ctx.fillStyle = color;
+          ctx.beginPath();
+          ctx.moveTo(x, toY(c.high));
+          ctx.lineTo(x, toY(c.low));
+          ctx.stroke();
+          const top = toY(Math.max(c.open, c.close));
+          const bot = toY(Math.min(c.open, c.close));
+          ctx.fillRect(x - cw / 2, top, cw, Math.max(1.5, bot - top));
+        });
+      } else {
+        ctx.strokeStyle = '#38bdf8';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        candles.forEach((c, i) => {
+          const x = toX(i);
+          const y = toY(c.close);
+          if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        });
+        ctx.stroke();
+      }
+
+      const drawEma = (key, color) => {
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        candles.forEach((c, i) => {
+          const x = toX(i);
+          const y = toY(c[key]);
+          if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        });
+        ctx.stroke();
+      };
+      if (showEma10) drawEma('ema10', '#fbbf24');
+      if (showEma20) drawEma('ema20', '#38bdf8');
+    }
+
+    function renderChartFromState() {
+      if (!latestChartPayload) return;
+      const container = document.getElementById('ticker-chart-container');
+      const candles = latestChartPayload.candles || [];
+      if (!candles.length) return;
+
+      const showEma10 = document.getElementById('chk-ema10').checked;
+      const showEma20 = document.getElementById('chk-ema20').checked;
+      const showVol = document.getElementById('chk-volume').checked;
+
+      updateOhlcLegend(candles[candles.length - 1]);
+
+      if (lwResizeObserver) {
+        lwResizeObserver.disconnect();
+        lwResizeObserver = null;
+      }
+      if (lwChart) {
+        lwChart.remove();
+        lwChart = null;
+      }
+
+      if (typeof window.LightweightCharts === 'undefined') {
+        renderCanvasFallback(container, latestChartPayload, showEma10, showEma20);
+        return;
+      }
+
+      container.innerHTML = '';
+      lwChart = window.LightweightCharts.createChart(container, {
+        width: container.clientWidth,
+        height: 380,
+        layout: {
+          background: { type: 'solid', color: '#030712' },
+          textColor: '#9ca3af',
+        },
+        grid: {
+          vertLines: { color: '#111827' },
+          horzLines: { color: '#111827' },
+        },
+        crosshair: {
+          mode: window.LightweightCharts.CrosshairMode.Normal,
+        },
+        rightPriceScale: {
+          borderColor: '#1f2937',
+        },
+        timeScale: {
+          borderColor: '#1f2937',
+          timeVisible: true,
+        },
+      });
+
+      let mainSeries;
+      if (currentChartType === 'candles') {
+        mainSeries = lwChart.addCandlestickSeries({
+          upColor: '#10b981',
+          downColor: '#f43f5e',
+          borderUpColor: '#10b981',
+          borderDownColor: '#f43f5e',
+          wickUpColor: '#10b981',
+          wickDownColor: '#f43f5e',
+        });
+        mainSeries.setData(candles.map(c => ({
+          time: c.time,
+          open: c.open,
+          high: c.high,
+          low: c.low,
+          close: c.close,
+        })));
+      } else {
+        mainSeries = lwChart.addAreaSeries({
+          lineColor: '#38bdf8',
+          topColor: 'rgba(56, 189, 248, 0.35)',
+          bottomColor: 'rgba(56, 189, 248, 0.02)',
+          lineWidth: 2,
+        });
+        mainSeries.setData(candles.map(c => ({
+          time: c.time,
+          value: c.close,
+        })));
+      }
+
+      // Marcadores de decisiones BUY/SELL del agente
+      const markers = (latestChartPayload.markers || []).map(m => ({
+        time: m.time,
+        position: m.action === 'BUY' ? 'belowBar' : 'aboveBar',
+        color: m.action === 'BUY' ? '#10b981' : '#f43f5e',
+        shape: m.action === 'BUY' ? 'arrowUp' : 'arrowDown',
+        text: m.action,
+      }));
+      if (markers.length && typeof mainSeries.setMarkers === 'function') {
+        mainSeries.setMarkers(markers);
+      }
+
+      if (showVol) {
+        const volSeries = lwChart.addHistogramSeries({
+          priceFormat: { type: 'volume' },
+          priceScaleId: '',
+        });
+        volSeries.priceScale().applyOptions({
+          scaleMargins: { top: 0.82, bottom: 0 },
+        });
+        volSeries.setData(candles.map(c => ({
+          time: c.time,
+          value: c.volume,
+          color: c.close >= c.open ? 'rgba(16, 185, 129, 0.28)' : 'rgba(244, 63, 94, 0.28)',
+        })));
+      }
+
+      if (showEma10) {
+        const ema10Series = lwChart.addLineSeries({
+          color: '#fbbf24',
+          lineWidth: 1.5,
+          priceLineVisible: false,
+          lastValueVisible: false,
+        });
+        ema10Series.setData(candles.map(c => ({ time: c.time, value: c.ema10 })));
+      }
+
+      if (showEma20) {
+        const ema20Series = lwChart.addLineSeries({
+          color: '#38bdf8',
+          lineWidth: 1.5,
+          priceLineVisible: false,
+          lastValueVisible: false,
+        });
+        ema20Series.setData(candles.map(c => ({ time: c.time, value: c.ema20 })));
+      }
+
+      lwChart.timeScale().fitContent();
+
+      // Actualizar leyenda OHLCV al mover cursor
+      const byTime = new Map(candles.map(c => [c.time, c]));
+      lwChart.subscribeCrosshairMove(param => {
+        if (!param || !param.time) {
+          updateOhlcLegend(candles[candles.length - 1]);
+          return;
+        }
+        const hit = byTime.get(String(param.time));
+        if (hit) updateOhlcLegend(hit);
+      });
+
+      lwResizeObserver = new ResizeObserver(() => {
+        if (lwChart && container.clientWidth > 0) {
+          lwChart.applyOptions({ width: container.clientWidth });
+        }
+      });
+      lwResizeObserver.observe(container);
+    }
+
+    async function loadTickerChart(symbol) {
+      try {
+        const sym = symbol || tickerSelect.value || 'BTC-USD';
+        const mode = document.getElementById('mode-select').value || 'replay';
+        const res = await fetch(`${API_BASE}/api/candles?symbol=${encodeURIComponent(sym)}&limit=${currentChartLimit}&mode=${encodeURIComponent(mode)}`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        latestChartPayload = data;
+
+        document.getElementById('chart-symbol').textContent = `Gráfica: ${data.symbol}`;
+        document.getElementById('chart-last-price').textContent = `$${Number(data.last_close).toLocaleString()}`;
+        const chgEl = document.getElementById('chart-change-badge');
+        const chg = Number(data.change_pct_1d);
+        chgEl.textContent = `${chg >= 0 ? '+' : ''}${chg.toFixed(2)}% (1D)`;
+        chgEl.className = `px-2 py-0.5 rounded text-xs font-semibold ${chg >= 0 ? 'bg-emerald-500/20 text-emerald-300' : 'bg-rose-500/20 text-rose-300'}`;
+        document.getElementById('chart-range').textContent = `Máx: $${Number(data.high_period).toLocaleString()} | Mín: $${Number(data.low_period).toLocaleString()}`;
+        document.getElementById('chart-source-badge').textContent = data.data_source;
+
+        renderChartFromState();
+      } catch (err) {
+        console.error('Error cargando gráfica del ticker:', err);
+      }
+    }
+
+    async function controlAction(action, payload = {}) {
+      const key = document.getElementById('gateway-key').value;
+      try {
+        const res = await fetch(`${API_BASE}/api/control/${action}`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-API-Key': key
+          },
+          body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `Error HTTP ${res.status}`);
+        showFeedback(data.message || `Acción '${action}' completada`);
+        await refreshDashboard();
+        if (action === 'step' || action === 'replay') {
+          await loadTickerChart(tickerSelect.value);
+        }
+      } catch (err) {
+        showFeedback(err.message, true);
+      }
+    }
+
+    async function runReplayBatch(n = 25) {
+      const sym = tickerSelect.value;
+      await controlAction('replay', { symbol: sym, n_cycles: n });
+    }
+
+    async function refreshDashboard() {
+      try {
+        const [stRes, decRes] = await Promise.all([
+          fetch(`${API_BASE}/api/status`).then(r => r.json()),
+          fetch(`${API_BASE}/api/decisions?limit=30`).then(r => r.json())
+        ]);
+
+        if (!initialSyncDone) {
+          initialSyncDone = true;
+          if (stRes.active_ticker) tickerSelect.value = stRes.active_ticker;
+          if (stRes.source_mode) document.getElementById('mode-select').value = stRes.source_mode;
+          loadTickerChart(tickerSelect.value);
+        }
+
+        // Status badge
+        const badge = document.getElementById('status-badge');
+        badge.textContent = `Estado: ${stRes.system_status}`;
+        badge.className = `px-3 py-1 rounded-full text-xs font-semibold ${
+          stRes.system_status === 'RUNNING' ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40' :
+          stRes.system_status === 'PAUSED' ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40' :
+          'bg-rose-500/20 text-rose-300 border border-rose-500/40'
+        }`;
+
+        // Cards
+        document.getElementById('card-symbol').textContent = stRes.active_ticker;
+        const fallbackPrice = latestChartPayload && latestChartPayload.symbol === stRes.active_ticker ? latestChartPayload.last_close : 0;
+        const displayPrice = stRes.portfolio.last_price > 0 ? stRes.portfolio.last_price : fallbackPrice;
+        document.getElementById('card-price').textContent = displayPrice > 0 ? `Precio: $${Number(displayPrice).toLocaleString()}` : 'Precio: --';
+        document.getElementById('card-equity').textContent = `$${stRes.portfolio.total_equity.toLocaleString()}`;
+        document.getElementById('card-cash').textContent = `Efectivo: $${stRes.portfolio.cash.toLocaleString()}`;
+        document.getElementById('card-pos').textContent = Number(stRes.portfolio.position_qty).toFixed(4);
+        document.getElementById('card-dd').textContent = `Max DD: ${Number(stRes.metrics.max_drawdown_pct).toFixed(2)}% | Win Rate: ${stRes.metrics.win_rate}`;
+
+        // Latest Decision Node details
+        const latest = decRes.items && decRes.items.length > 0 ? decRes.items[0] : null;
+        if (latest) {
+          const predPct = (latest.model_pred * 100).toFixed(4);
+          document.getElementById('card-pred').textContent = `${latest.model_pred > 0 ? '+' : ''}${predPct}%`;
+          document.getElementById('card-close-utc').textContent = `Vela: ${latest.candle_close_utc}`;
+
+          document.getElementById('node-laya1-regime').textContent = `Régimen: ${latest.laya1_json?.regime || '--'}`;
+          document.getElementById('node-laya1-signal').textContent = `Señal: ${latest.laya1_json?.signal_action || '--'}`;
+          document.getElementById('node-laya1-conv').textContent = `Convicción: ${latest.laya1_json?.conviction_level || '--'} (${latest.laya1_json?.conviction_score ?? '--'})`;
+
+          document.getElementById('node-qwen-action').textContent = `Propuesta: ${latest.qwen_json?.action || '--'}`;
+          document.getElementById('node-qwen-just').textContent = latest.qwen_json?.justification || '--';
+
+          document.getElementById('node-laya2-sec').textContent = `Seguridad: ${latest.laya2_json?.security_status || '--'}`;
+          document.getElementById('node-laya2-coh').textContent = `Coherencia: ${latest.laya2_json?.coherence_status || '--'}`;
+
+          document.getElementById('node-risk-verdict').textContent = `Veredicto: ${latest.final_action} (${latest.risk_status})`;
+          document.getElementById('node-risk-reason').textContent = latest.risk_reason || '--';
+        }
+
+        // Decisions Table
+        const tbody = document.getElementById('decisions-body');
+        tbody.innerHTML = '';
+        if (decRes.items && decRes.items.length > 0) {
+          decRes.items.forEach(d => {
+            const tr = document.createElement('tr');
+            tr.className = 'hover:bg-gray-800/40';
+            const rPct = (d.model_pred * 100).toFixed(3);
+            tr.innerHTML = `
+              <td class="py-2 font-mono text-[11px] text-gray-400">${d.candle_close_utc}</td>
+              <td class="py-2 font-semibold text-white">${d.symbol}</td>
+              <td class="py-2"><span class="px-1.5 py-0.5 rounded text-[10px] ${d.source_mode === 'live' ? 'bg-cyan-500/20 text-cyan-300' : 'bg-violet-500/20 text-violet-300'}">${d.source_mode}</span></td>
+              <td class="py-2 font-mono ${d.model_pred >= 0 ? 'text-emerald-400' : 'text-rose-400'}">${d.model_pred >= 0 ? '+' : ''}${rPct}%</td>
+              <td class="py-2">${d.laya1_json?.regime || '--'}</td>
+              <td class="py-2 font-medium">${d.qwen_json?.action || '--'}</td>
+              <td class="py-2"><span class="font-bold ${d.risk_status === 'APPROVED' ? 'text-emerald-400' : 'text-rose-400'}">${d.final_action}</span></td>
+              <td class="py-2 font-mono text-gray-400">${d.latency_ms.toFixed(1)} ms</td>
+            `;
+            tbody.appendChild(tr);
+          });
+        }
+      } catch (err) {
+        console.error('Error actualizando dashboard:', err);
+      }
+    }
+
+    async function loadBenchmark() {
+      try {
+        const res = await fetch(`${API_BASE}/api/benchmark`);
+        const data = await res.json();
+        document.getElementById('bm-meta').textContent = `${data.symbol} • ${data.cycles_evaluated} Ciclos`;
+        const bBody = document.getElementById('benchmark-body');
+        bBody.innerHTML = '';
+        data.lanes.forEach(l => {
+          const tr = document.createElement('tr');
+          tr.innerHTML = `
+            <td class="py-2 font-semibold text-white">${l.strategy}</td>
+            <td class="py-2 font-mono">$${l.final_equity.toLocaleString()}</td>
+            <td class="py-2 font-bold ${l.net_return_pct >= 0 ? 'text-emerald-400' : 'text-rose-400'}">${l.net_return_pct >= 0 ? '+' : ''}${l.net_return_pct.toFixed(2)}%</td>
+            <td class="py-2 text-amber-300 font-mono">${l.max_drawdown_pct.toFixed(2)}%</td>
+            <td class="py-2">${typeof l.win_rate === 'number' ? l.win_rate + '%' : l.win_rate}</td>
+            <td class="py-2">${l.total_orders}</td>
+            <td class="py-2 font-mono text-gray-400">${l.avg_latency_ms.toFixed(1)} ms</td>
+          `;
+          bBody.appendChild(tr);
+        });
+        document.getElementById('bm-interpretation').textContent = data.interpretation;
+      } catch (err) {
+        console.error('Error cargando benchmark:', err);
+      }
+    }
+
+    // Initial load and periodic refresh
+    refreshDashboard();
+    loadBenchmark();
+    setInterval(refreshDashboard, 5000);
+  </script>
+</body>
+</html>
