@@ -195,6 +195,8 @@ class TradingDatabase:
         default_mode: str,
         profile_name: str,
         initial_capital: float,
+        default_interval: str = "1d",
+        default_qwen_mode: str = "EXTERNAL_API",
     ) -> None:
         if self.get_state("system_status") is None:
             self.set_state("system_status", default_status)
@@ -202,6 +204,10 @@ class TradingDatabase:
             self.set_state("active_ticker", default_ticker)
         if self.get_state("source_mode") is None:
             self.set_state("source_mode", default_mode)
+        if self.get_state("candle_interval") is None:
+            self.set_state("candle_interval", default_interval)
+        if self.get_state("qwen_mode") is None:
+            self.set_state("qwen_mode", default_qwen_mode)
         if self.get_state("simulation_profile") is None:
             self.set_state("simulation_profile", profile_name)
         if self.get_state("initial_capital") is None:

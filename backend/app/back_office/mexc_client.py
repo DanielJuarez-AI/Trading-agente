@@ -215,29 +215,49 @@ class MEXCMarketClient:
                 )
         else:
             # Acciones / ETFs de los 30 PRIMARY_TICKERS vía datos públicos yfinance
+            if tf not in {"1h", "1d"}:
+                raise ValueError(f"Temporalidad no soportada: {tf}. Use '1h' o '1d'.")
             try:
+                yf_period = "30d" if tf == "1h" else "1y"
                 hist = yf.download(
                     tickers=symbol,
-                    period="1y",
-                    interval="1d",
+                    period=yf_period,
+                    interval=tf,
                     auto_adjust=True,
                     progress=False,
                 )
                 if hist.empty:
                     raise ValueError(f"Sin velas para {symbol} desde proveedor público.")
+                if isinstance(hist.columns, pd.MultiIndex):
+                    hist.columns = hist.columns.get_level_values(0)
                 hist = hist.reset_index()
-                date_col = "Date" if "Date" in hist.columns else hist.columns[0]
+                date_col = (
+                    "Datetime"
+                    if "Datetime" in hist.columns
+                    else ("Date" if "Date" in hist.columns else hist.columns[0])
+                )
                 for _, row in hist.iterrows():
-                    dt = pd.to_datetime(row[date_col], utc=True)
-                    close_dt = dt + timedelta(hours=23, minutes=59, seconds=59)
+                    raw_dt = row[date_col]
+                    if hasattr(raw_dt, "iloc"):
+                        raw_dt = raw_dt.iloc[0]
+                    dt = pd.to_datetime(raw_dt, utc=True)
+                    if tf == "1h":
+                        open_dt = dt
+                        close_dt = dt + timedelta(minutes=59, seconds=59)
+                        open_str = open_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+                        close_str = close_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+                    else:
+                        close_dt = dt + timedelta(hours=23, minutes=59, seconds=59)
+                        open_str = dt.strftime("%Y-%m-%dT00:00:00Z")
+                        close_str = close_dt.strftime("%Y-%m-%dT23:59:59Z")
                     if close_dt > current_utc:
                         continue
                     rows.append(
                         {
                             "symbol": symbol,
-                            "interval": "1d",
-                            "open_time": dt.strftime("%Y-%m-%dT00:00:00Z"),
-                            "close_time": close_dt.strftime("%Y-%m-%dT23:59:59Z"),
+                            "interval": tf,
+                            "open_time": open_str,
+                            "close_time": close_str,
                             "open": float(row["Open"].iloc[0] if hasattr(row["Open"], "iloc") else row["Open"]),
                             "high": float(row["High"].iloc[0] if hasattr(row["High"], "iloc") else row["High"]),
                             "low": float(row["Low"].iloc[0] if hasattr(row["Low"], "iloc") else row["Low"]),
@@ -251,7 +271,7 @@ class MEXCMarketClient:
                     error_code="MARKET_DATA_FETCH_ERROR",
                     component="MEXCMarketClient",
                     message=f"Error obteniendo datos públicos para {symbol}: {exc}",
-                    payload_excerpt=f"symbol={symbol}",
+                    payload_excerpt=f"symbol={symbol}, interval={tf}",
                 )
                 self.db.set_state("system_status", "PAUSED")
                 raise MarketDataUnavailableError(str(exc)) from exc
@@ -263,13 +283,44 @@ class MEXCMarketClient:
 
     def load_replay_candles(self, symbol: str, interval: str = "1d") -> pd.DataFrame:
         """
-        Carga velas históricas cerradas desde cache local (data/replay_candles.json)
-        para evaluación reproducible en modo Historical Replay sin simular frecuencia artificial.
+        Carga velas históricas cerradas desde cache local (`replay_candles.json` para 1d
+        o `replay_candles_1h.json` para 1h) para evaluación reproducible sin look-ahead.
         """
         if symbol not in self.settings.allowed_symbols:
             raise ValueError(f"Símbolo fuera de lista blanca: {symbol}")
+        if interval not in {"1h", "1d"}:
+            raise ValueError(f"Temporalidad no soportada: {interval}. Use '1h' o '1d'.")
 
         canonical = "BTC-USD" if symbol == "BTCUSDT" else symbol
+        if interval == "1h":
+            cache_path = self.replay_cache_path.parent / "replay_candles_1h.json"
+            if cache_path.exists():
+                cache_1h: Dict[str, List[Dict[str, Any]]] = json.loads(
+                    cache_path.read_text(encoding="utf-8")
+                )
+                if canonical in cache_1h and len(cache_1h[canonical]) >= 50:
+                    rows = [
+                        {
+                            "symbol": symbol,
+                            "interval": "1h",
+                            "open_time": item["open_time"],
+                            "close_time": item["close_time"],
+                            "open": float(item["open"]),
+                            "high": float(item["high"]),
+                            "low": float(item["low"]),
+                            "close": float(item["close"]),
+                            "volume": float(item["volume"]),
+                            "source_mode": "replay",
+                        }
+                        for item in cache_1h[canonical]
+                    ]
+                    return self._validate_and_sort_candles(
+                        rows,
+                        symbol=symbol,
+                        current_utc=datetime.now(timezone.utc),
+                        check_freshness=False,
+                    )
+
         if not self.replay_cache_path.exists():
             raise FileNotFoundError(
                 f"Cache de replay no encontrado en {self.replay_cache_path}. "
@@ -282,9 +333,37 @@ class MEXCMarketClient:
         if canonical not in cache:
             raise ValueError(f"Ticker {canonical} no encontrado en replay_candles.json")
 
-        rows = []
-        for item in cache[canonical]:
-            rows.append(
+        if interval == "1h":
+            # Respaldo determinista intradía si no existe replay_candles_1h.json
+            rows = []
+            for item in cache[canonical][-30:]:
+                day_dt = _parse_iso_utc(item["open_time"])
+                o = float(item["open"])
+                c = float(item["close"])
+                vol_h = float(item["volume"]) / 8.0
+                for h_idx in range(8):
+                    frac0 = h_idx / 8.0
+                    frac1 = (h_idx + 1) / 8.0
+                    p0 = o + (c - o) * frac0
+                    p1 = o + (c - o) * frac1
+                    o_dt = day_dt + timedelta(hours=13 + h_idx)
+                    c_dt = o_dt + timedelta(minutes=59, seconds=59)
+                    rows.append(
+                        {
+                            "symbol": symbol,
+                            "interval": "1h",
+                            "open_time": o_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                            "close_time": c_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                            "open": p0,
+                            "high": max(p0, p1, float(item["high"]) * 0.999 if h_idx == 4 else max(p0, p1)),
+                            "low": min(p0, p1, float(item["low"]) * 1.001 if h_idx == 2 else min(p0, p1)),
+                            "close": p1,
+                            "volume": vol_h,
+                            "source_mode": "replay",
+                        }
+                    )
+        else:
+            rows = [
                 {
                     "symbol": symbol,
                     "interval": interval,
@@ -297,7 +376,8 @@ class MEXCMarketClient:
                     "volume": float(item["volume"]),
                     "source_mode": "replay",
                 }
-            )
+                for item in cache[canonical]
+            ]
         return self._validate_and_sort_candles(
             rows,
             symbol=symbol,
@@ -334,18 +414,23 @@ class MEXCMarketClient:
         latest_close_dt = df["_close_dt"].iloc[-1]
         if check_freshness:
             age_seconds = (current_utc - latest_close_dt).total_seconds()
-            if age_seconds > self.settings.max_data_age_seconds:
+            effective_max_age = (
+                self.settings.max_data_age_seconds
+                if self._is_crypto_mexc_symbol(symbol)
+                else max(self.settings.max_data_age_seconds, 5 * 86400)
+            )
+            if age_seconds > effective_max_age:
                 self.db.log_error(
                     error_code="STALE_DATA_REJECTED",
                     component="MEXCMarketClient",
                     message=(
                         f"Dato atrasado rechazado para {symbol}: antigüedad={int(age_seconds)}s "
-                        f"> máximo={self.settings.max_data_age_seconds}s"
+                        f"> máximo={effective_max_age}s"
                     ),
                     payload_excerpt=f"latest_close={df['close_time'].iloc[-1]}",
                 )
                 raise StaleDataError(
-                    f"Dato atrasado para {symbol} (antigüedad {int(age_seconds)}s > {self.settings.max_data_age_seconds}s)."
+                    f"Dato atrasado para {symbol} (antigüedad {int(age_seconds)}s > {effective_max_age}s)."
                 )
 
         return df.drop(columns=["_close_dt"])
