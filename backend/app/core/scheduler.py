@@ -14,6 +14,7 @@ Flujo estricto:
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from typing import Any, Dict, List, Optional
 
@@ -102,23 +103,30 @@ class TradingScheduler:
         }
 
         # Etapa 1: Registro idempotente en SQLite (bloquea velas duplicadas)
+        t_stage = time.perf_counter()
         candle_id = self.db.register_candle_idempotent(candle_dict)
+        ingest_ms = (time.perf_counter() - t_stage) * 1000.0
 
         # Etapa 2: Generación de Alpha Cuantitativo (T4 LSTM congelado)
+        t_stage = time.perf_counter()
         prediction = self.predictor.predict_from_candles(candles_df, symbol=symbol)
         last_price = float(last_row["close"])
         portfolio = self.paper_engine.get_portfolio_state(current_price=last_price)
         position_open = portfolio.position_qty >= self.settings.min_lot_size
+        lstm_ms = (time.perf_counter() - t_stage) * 1000.0
 
-        # Etapa 3: Laya #1 [DISPOSITIVO LOCAL - OLLAMA /v1/systemone]
+        # Etapa 3: Laya #1 [DISPOSITIVO LOCAL - DRL / OLLAMA /v1/systemone]
+        t_stage = time.perf_counter()
         laya1_out = self.laya_alpha.evaluate(
             prediction=prediction,
             position_open=position_open,
             gateway_key=gateway_key,
             strict_live=strict_live_llm,
         )
+        laya1_ms = (time.perf_counter() - t_stage) * 1000.0
 
-        # Etapa 4: Qwen 14B [API EXTERNA - NO LOCAL] + Validación Pydantic
+        # Etapa 4: Qwen [API EXTERNA o LOCAL 6GB] + Validación Pydantic + Retroalimentación
+        t_stage = time.perf_counter()
         qwen_out = self.qwen_agent.orchestrate(
             prediction=prediction,
             laya1=laya1_out,
@@ -126,8 +134,26 @@ class TradingScheduler:
             gateway_key=gateway_key,
             strict_live=strict_live_llm,
         )
+        qwen_ms = (time.perf_counter() - t_stage) * 1000.0
+
+        # Etapa 4b: Entrega y aplicación de retroalimentación de Qwen hacia Laya #1 y Laya #2
+        orch_fb = qwen_out.get("orchestrator_feedback", {}) or {}
+        t_fb1 = time.perf_counter()
+        fb_laya1_applied = self.laya_alpha.apply_qwen_feedback(orch_fb.get("to_laya1", {}) or {})
+        feedback_laya1_ms = (time.perf_counter() - t_fb1) * 1000.0
+
+        t_fb2 = time.perf_counter()
+        fb_laya2_applied = self.laya_guard.apply_qwen_feedback(orch_fb.get("to_laya2", {}) or {})
+        feedback_laya2_ms = (time.perf_counter() - t_fb2) * 1000.0
+
+        feedback_applied = {
+            "to_laya1": fb_laya1_applied,
+            "to_laya2": fb_laya2_applied,
+        }
+        qwen_out["feedback_applied"] = feedback_applied
 
         # Etapa 5: Laya #2 [DISPOSITIVO LOCAL - OLLAMA /v1/systemone]
+        t_stage = time.perf_counter()
         laya2_out = self.laya_guard.audit(
             prediction=prediction,
             qwen_decision=qwen_out,
@@ -136,8 +162,10 @@ class TradingScheduler:
             extra_metadata=extra_metadata,
             strict_live=strict_live_llm,
         )
+        laya2_ms = (time.perf_counter() - t_stage) * 1000.0
 
-        # Etapa 6: Motor Determinista de Riesgo (Hard Gate en Python puro)
+        # Etapa 6 & 7: Motor Determinista de Riesgo + Liquidación Paper
+        t_stage = time.perf_counter()
         system_status = self.db.get_state("system_status", "RUNNING") or "RUNNING"
         verdict = self.risk_engine.evaluate(
             proposed_action=str(qwen_out["action"]),
@@ -149,7 +177,6 @@ class TradingScheduler:
             laya2_reason=laya2_out.reason,
         )
 
-        # Etapa 7: Liquidación Paper y Persistencia Atómica SQLite
         sim_exec = self.paper_engine.simulate_execution(
             action=verdict.final_action,
             symbol=symbol,
@@ -157,8 +184,24 @@ class TradingScheduler:
         )
         sim_exec["snapshot"]["candle_time"] = candle_dict["close_time"]
         sim_exec["snapshot"]["source_mode"] = source_mode
+        risk_paper_ms = (time.perf_counter() - t_stage) * 1000.0
 
         total_latency_ms = (time.perf_counter() - t_cycle_start) * 1000.0
+        stage_latencies_ms = {
+            "ingest_ms": round(ingest_ms, 2),
+            "lstm_ms": round(lstm_ms, 2),
+            "laya1_ms": round(laya1_ms, 2),
+            "qwen_ms": round(qwen_ms, 2),
+            "feedback_laya1_ms": round(feedback_laya1_ms, 2),
+            "feedback_laya2_ms": round(feedback_laya2_ms, 2),
+            "laya2_ms": round(laya2_ms, 2),
+            "risk_paper_ms": round(risk_paper_ms, 2),
+            "total_cycle_ms": round(total_latency_ms, 2),
+            "updated_at": candle_dict["close_time"],
+        }
+        qwen_out["stage_latencies_ms"] = stage_latencies_ms
+        self.db.set_state("last_stage_latencies_json", json.dumps(stage_latencies_ms))
+
         decision_record = {
             "symbol": symbol,
             "interval": interval,
@@ -171,7 +214,7 @@ class TradingScheduler:
             "risk_reason": verdict.reason,
             "final_action": verdict.final_action,
             "latency_ms": round(total_latency_ms, 2),
-            "qwen_execution_mode": QWEN_EXECUTION_LOCATION,
+            "qwen_execution_mode": str(qwen_out.get("execution_mode", QWEN_EXECUTION_LOCATION)),
             "laya_execution_mode": LAYA1_EXECUTION_MODE,
             "source_mode": source_mode,
         }
@@ -205,21 +248,27 @@ class TradingScheduler:
             "order": sim_exec["order"],
             "snapshot": sim_exec["snapshot"],
             "latency_ms": round(total_latency_ms, 2),
+            "stage_latencies_ms": stage_latencies_ms,
+            "feedback_applied": feedback_applied,
         }
 
     def run_single_live_cycle(
-        self, symbol: Optional[str] = None, gateway_key: Optional[str] = None
+        self,
+        symbol: Optional[str] = None,
+        gateway_key: Optional[str] = None,
+        interval: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Consulta mercado público en modo live y ejecuta un ciclo de decisión."""
         sym = symbol or self.db.get_state("active_ticker", self.settings.trading_symbol) or self.settings.trading_symbol
+        tf = interval or self.db.get_state("candle_interval", self.settings.candle_interval) or self.settings.candle_interval
         key = gateway_key or self.settings.gateway_api_key
         df = self.market_client.fetch_live_candles(
-            symbol=sym, interval=self.settings.candle_interval
+            symbol=sym, interval=tf
         )
         return self.process_candle_window(
             candles_df=df,
             symbol=sym,
-            interval=self.settings.candle_interval,
+            interval=tf,
             source_mode="live",
             gateway_key=key,
         )
@@ -229,19 +278,21 @@ class TradingScheduler:
         symbol: Optional[str] = None,
         n_cycles: int = 25,
         gateway_key: Optional[str] = None,
+        interval: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
         Ejecuta `n_cycles` (>=20 requeridos) secuenciales sobre velas históricas cerradas
         en modo 'replay', preservando estricto orden cronológico y cero look-ahead.
         """
         sym = symbol or self.db.get_state("active_ticker", self.settings.trading_symbol) or self.settings.trading_symbol
+        tf = interval or self.db.get_state("candle_interval", self.settings.candle_interval) or self.settings.candle_interval
         key = gateway_key or self.settings.gateway_api_key
-        full_df = self.market_client.load_replay_candles(symbol=sym, interval="1d")
+        full_df = self.market_client.load_replay_candles(symbol=sym, interval=tf)
 
         min_warmup = 45
         if len(full_df) < min_warmup + n_cycles:
             raise ValueError(
-                f"Histórico insuficiente para {n_cycles} ciclos en {sym}: {len(full_df)} filas."
+                f"Histórico insuficiente para {n_cycles} ciclos en {sym} ({tf}): {len(full_df)} filas."
             )
 
         start_end_idx = len(full_df) - n_cycles
@@ -254,7 +305,7 @@ class TradingScheduler:
                 res = self.process_candle_window(
                     candles_df=window_df,
                     symbol=sym,
-                    interval="1d",
+                    interval=tf,
                     source_mode="replay",
                     gateway_key=key,
                 )

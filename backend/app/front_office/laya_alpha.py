@@ -10,20 +10,97 @@ Front Office - Agente Laya #1 (Triaje de Alpha, Régimen y Convicción System-1)
 
 from __future__ import annotations
 
+import json
+import math
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 import httpx
+import numpy as np
+import torch
+import torch.nn as nn
 
 from backend.app.back_office.database import TradingDatabase
-from backend.app.core.config import Settings
+from backend.app.core.config import ARTIFACTS_DIR, Settings
 from backend.app.core.security import PrivateAuthGateway
 from backend.app.front_office.predictor import PredictionResult
 
 # Marcadores explícitos de ejecución en dispositivo local
 LAYA1_EXECUTION_MODE: str = "LOCAL_DEVICE"
 LAYA1_IS_LOCAL_DEVICE: bool = True
+
+DRL_ACTIONS: List[str] = ["BUY", "HOLD", "SELL"]
+DRL_REGIMES: List[str] = ["bull_trend", "bear_trend", "sideways", "high_vol_chop", "none"]
+DRL_STATE_DIM: int = 10
+
+
+def build_drl_state_vector(
+    pred_return_t1: float,
+    ret_lag_1: float,
+    ema_ratio: float,
+    vol_20: float,
+    rsi_14: float,
+    momentum_5: float,
+    position_open: bool,
+) -> np.ndarray:
+    """Construye el vector de estado de 10 dimensiones para Laya #1 DRL."""
+    r = float(pred_return_t1)
+    v = max(float(vol_20), 1e-4)
+    signed_sqrt_r = math.copysign(math.sqrt(min(abs(r) * 100.0, 25.0)), r)
+    sharpe_like = float(np.clip(r / v, -5.0, 5.0))
+    trend_sign = 1.0 if ema_ratio >= 1.0 else -1.0
+
+    return np.asarray(
+        [
+            float(np.clip(r * 50.0, -5.0, 5.0)),
+            float(np.clip(float(ret_lag_1) * 50.0, -5.0, 5.0)),
+            float(np.clip((float(ema_ratio) - 1.0) * 50.0, -5.0, 5.0)),
+            float(np.clip(v * 25.0, 0.0, 5.0)),
+            float(np.clip((float(rsi_14) - 50.0) / 50.0, -1.0, 1.0)),
+            float(np.clip(float(momentum_5) * 20.0, -5.0, 5.0)),
+            1.0 if position_open else 0.0,
+            signed_sqrt_r,
+            sharpe_like,
+            trend_sign,
+        ],
+        dtype=np.float32,
+    )
+
+
+class Laya1DRLPolicyNet(nn.Module):
+    """
+    Red Dueling Double-DQN + Advantage Actor-Critic (A2C) + Regime Head para Laya #1.
+    Entrenada offline sobre splits temporales TR/VA (nunca TE) para decisiones
+    de triaje de alpha, régimen y convicción calibrada.
+    """
+
+    def __init__(self, state_dim: int = DRL_STATE_DIM, hidden_dim: int = 64) -> None:
+        super().__init__()
+        self.backbone = nn.Sequential(
+            nn.Linear(state_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.SiLU(),
+        )
+        self.value_head = nn.Linear(hidden_dim, 1)
+        self.advantage_head = nn.Linear(hidden_dim, len(DRL_ACTIONS))
+        self.policy_head = nn.Linear(hidden_dim, len(DRL_ACTIONS))
+        self.regime_head = nn.Linear(hidden_dim, len(DRL_REGIMES))
+
+    def forward(
+        self, x: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        h = self.backbone(x)
+        value = self.value_head(h)
+        advantage = self.advantage_head(h)
+        q_values = value + (advantage - advantage.mean(dim=-1, keepdim=True))
+        policy_logits = self.policy_head(h)
+        regime_logits = self.regime_head(h)
+        return q_values, policy_logits, regime_logits, value.squeeze(-1)
 
 
 class LLMServiceUnavailableError(RuntimeError):
@@ -44,6 +121,7 @@ class LayaAlphaOutput:
     transport: str
     model: str
     payload_token_estimate: int
+    qwen_feedback: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -60,6 +138,7 @@ class LayaAlphaOutput:
             "conviction_score": self.conviction_score,
             "latency_ms": round(self.latency_ms, 2),
             "payload_token_estimate": self.payload_token_estimate,
+            "qwen_feedback": self.qwen_feedback or {},
         }
 
 
@@ -75,12 +154,66 @@ class LayaAlphaAgent:
         db: TradingDatabase,
         gateway: PrivateAuthGateway,
         http_client: Optional[httpx.Client] = None,
+        artifacts_dir: Optional[Path] = None,
     ) -> None:
         self.settings = settings
         self.db = db
         self.gateway = gateway
         self.http_client = http_client
         self._last_unavailable_ts: Optional[float] = None
+        self.artifacts_dir = artifacts_dir or ARTIFACTS_DIR
+        self.drl_net: Optional[Laya1DRLPolicyNet] = None
+        self.drl_temperature: float = 1.0
+        self.drl_model_tag: str = "laya1_drl_v1"
+        self.conviction_bias: float = 0.0
+        self.last_qwen_feedback: Dict[str, Any] = {}
+        self._load_drl_model()
+        try:
+            saved_fb = self.db.get_state("laya1_feedback_json")
+            if saved_fb:
+                parsed = json.loads(saved_fb)
+                if isinstance(parsed, dict):
+                    self.last_qwen_feedback = parsed
+                    self.conviction_bias = float(parsed.get("applied_conviction_bias", 0.0))
+        except Exception:
+            pass
+
+    def apply_qwen_feedback(self, feedback: Dict[str, Any]) -> Dict[str, Any]:
+        """Aplica retroalimentación del orquestador Qwen sobre temperatura DRL y sesgo de convicción."""
+        if not feedback:
+            return dict(self.last_qwen_feedback)
+        temp_delta = float(feedback.get("temperature_delta", 0.0))
+        conv_bias = float(feedback.get("conviction_bias", 0.0))
+        self.drl_temperature = round(max(0.35, min(2.0, self.drl_temperature + temp_delta)), 4)
+        self.conviction_bias = round(max(-0.20, min(0.20, conv_bias)), 4)
+        applied = {
+            **feedback,
+            "applied_drl_temperature": self.drl_temperature,
+            "applied_conviction_bias": self.conviction_bias,
+        }
+        self.last_qwen_feedback = applied
+        self.db.set_state("laya1_feedback_json", json.dumps(applied, ensure_ascii=False))
+        return applied
+
+    def _load_drl_model(self) -> None:
+        weights_path = self.artifacts_dir / "laya1_drl_v1.pt"
+        manifest_path = self.artifacts_dir / "laya1_drl_manifest.json"
+        if not weights_path.exists():
+            return
+        try:
+            hidden_dim = 64
+            if manifest_path.exists():
+                man = json.loads(manifest_path.read_text(encoding="utf-8"))
+                hidden_dim = int(man.get("architecture", {}).get("hidden_dim", 64))
+                self.drl_temperature = float(man.get("calibration_temperature", 1.0))
+                self.drl_model_tag = str(man.get("model_version", "laya1_drl_v1"))
+            net = Laya1DRLPolicyNet(state_dim=DRL_STATE_DIM, hidden_dim=hidden_dim)
+            state_dict = torch.load(weights_path, map_location="cpu", weights_only=True)
+            net.load_state_dict(state_dict)
+            net.eval()
+            self.drl_net = net
+        except Exception:
+            self.drl_net = None
 
     def build_systemone_payload(
         self, prediction: PredictionResult, position_open: bool
@@ -121,7 +254,91 @@ class LayaAlphaAgent:
     def _calibrated_local_rlcd(
         self, prediction: PredictionResult, position_open: bool
     ) -> Dict[str, Any]:
-        """Inferencia probabilística calibrada cuando Ollama local no está en daemon."""
+        """
+        Inferencia local mediante Deep Reinforcement Learning (Dueling Double-DQN + A2C)
+        cuando el modelo `laya1_drl_v1.pt` está cargado, o fallback determinista si no existe.
+        """
+        if self.drl_net is not None:
+            state_vec = build_drl_state_vector(
+                pred_return_t1=prediction.pred_return_t1,
+                ret_lag_1=prediction.ret_lag_1,
+                ema_ratio=prediction.ema_ratio,
+                vol_20=prediction.vol_20,
+                rsi_14=prediction.rsi_14,
+                momentum_5=prediction.momentum_5,
+                position_open=position_open,
+            )
+            state_t = torch.tensor(state_vec, dtype=torch.float32).unsqueeze(0)
+            with torch.no_grad():
+                q_vals, policy_logits, regime_logits, _ = self.drl_net(state_t)
+
+                temp = max(0.25, float(self.drl_temperature))
+                # Máscara Long-Only para evitar acciones inválidas en distribución
+                masked_logits = policy_logits.clone()
+                valid_buy = (prediction.pred_return_t1 > 0.0) and (not position_open)
+                valid_sell = bool(position_open)
+                if not valid_buy:
+                    masked_logits[0, 0] -= 4.0
+                if not valid_sell:
+                    masked_logits[0, 2] -= 4.0
+
+                act_probs_t = torch.softmax(masked_logits / temp, dim=-1)[0]
+                reg_probs_t = torch.softmax(regime_logits / temp, dim=-1)[0]
+
+            sig_probs = {
+                act: round(float(act_probs_t[i].item()), 4)
+                for i, act in enumerate(DRL_ACTIONS)
+            }
+            regime_probs = {
+                reg: round(float(reg_probs_t[i].item()), 4)
+                for i, reg in enumerate(DRL_REGIMES)
+            }
+
+            # Selección estricta sobre acciones permitidas en Long-Only
+            valid_indices = [1]  # HOLD siempre permitido
+            if valid_buy:
+                valid_indices.append(0)
+            if valid_sell:
+                valid_indices.append(2)
+
+            best_idx = max(
+                valid_indices,
+                key=lambda idx: float(act_probs_t[idx].item()) + 0.15 * float(q_vals[0, idx].item()),
+            )
+            action = DRL_ACTIONS[best_idx]
+            regime_idx = int(torch.argmax(reg_probs_t).item())
+            regime = DRL_REGIMES[regime_idx]
+
+            sorted_p = sorted(sig_probs.values(), reverse=True)
+            margin = sorted_p[0] - sorted_p[1]
+            q_adv = float((q_vals[0, best_idx] - q_vals[0, 1]).clamp(-2.0, 2.0).item())
+            conv_score = float(
+                np.clip(
+                    0.35 + 0.50 * margin + 0.15 * (1.0 / (1.0 + math.exp(-q_adv))) + self.conviction_bias,
+                    0.15,
+                    0.96,
+                )
+            )
+            if conv_score >= 0.78:
+                conv_level = "high"
+            elif conv_score >= 0.58:
+                conv_level = "moderate"
+            elif conv_score >= 0.40:
+                conv_level = "low"
+            else:
+                conv_level = "very_low"
+
+            return {
+                "regime": regime,
+                "regime_probs": regime_probs,
+                "signal_action": action,
+                "signal_probs": sig_probs,
+                "conviction_level": conv_level,
+                "conviction_score": round(conv_score, 4),
+                "transport": "local_drl_dueling_a2c_v1",
+                "model": f"{self.settings.laya_model_name} ({self.drl_model_tag})",
+            }
+
         r = prediction.pred_return_t1
         ema_r = prediction.ema_ratio
         vol = prediction.vol_20
@@ -183,6 +400,8 @@ class LayaAlphaAgent:
         else:
             conv_level, conv_score = "very_low", 0.22
 
+        conv_score = round(float(np.clip(conv_score + self.conviction_bias, 0.15, 0.96)), 4)
+
         return {
             "regime": regime,
             "regime_probs": regime_probs,
@@ -190,6 +409,8 @@ class LayaAlphaAgent:
             "signal_probs": sig_probs,
             "conviction_level": conv_level,
             "conviction_score": conv_score,
+            "transport": "local_rlcd_calibrated_fallback",
+            "model": self.settings.laya_model_name,
         }
 
     def evaluate(
@@ -217,9 +438,14 @@ class LayaAlphaAgent:
         if (
             self.http_client is None
             and not strict_live
-            and self.settings.allow_local_laya_calibrated_fallback
-            and self._last_unavailable_ts is not None
-            and (time.monotonic() - self._last_unavailable_ts) < 15.0
+            and (
+                self.drl_net is not None
+                or (
+                    self.settings.allow_local_laya_calibrated_fallback
+                    and self._last_unavailable_ts is not None
+                    and (time.monotonic() - self._last_unavailable_ts) < 15.0
+                )
+            )
         ):
             cal = self._calibrated_local_rlcd(prediction, position_open)
             latency_ms = (time.perf_counter() - t0) * 1000.0
@@ -233,20 +459,76 @@ class LayaAlphaAgent:
                 latency_ms=latency_ms,
                 execution_mode=LAYA1_EXECUTION_MODE,
                 is_local_device=LAYA1_IS_LOCAL_DEVICE,
-                transport="local_rlcd_calibrated_fallback",
-                model=self.settings.laya_model_name,
+                transport=str(cal.get("transport", "local_rlcd_calibrated_fallback")),
+                model=str(cal.get("model", self.settings.laya_model_name)),
                 payload_token_estimate=token_est,
+                qwen_feedback=dict(self.last_qwen_feedback),
             )
 
         owns_client = self.http_client is None
         client = self.http_client or httpx.Client(
             timeout=httpx.Timeout(
-                timeout=min(float(self.settings.llm_timeout_seconds), 3.0),
+                timeout=min(float(self.settings.llm_timeout_seconds), 5.0),
                 connect=0.25,
             )
         )
         try:
             resp = client.post(url, json=payload)
+            if resp.status_code == 404:
+                gen_url = f"{self.settings.ollama_base_url.rstrip('/')}/api/generate"
+                gen_prompt = (
+                    "Analiza el siguiente estado System-1 y devuelve SOLO JSON con claves "
+                    "regime, signal_action, conviction_level, conviction_score: "
+                    + json.dumps(payload["state"], ensure_ascii=False)
+                )
+                resp = client.post(
+                    gen_url,
+                    json={
+                        "model": self.settings.laya_model_name,
+                        "prompt": gen_prompt,
+                        "format": "json",
+                        "stream": False,
+                        "keep_alive": "24h",
+                        "options": {"temperature": 0.0, "num_ctx": 512, "num_predict": 80},
+                    },
+                )
+                resp.raise_for_status()
+                self._last_unavailable_ts = None
+                gen_data = resp.json()
+                latency_ms = (time.perf_counter() - t0) * 1000.0
+                cal = self._calibrated_local_rlcd(prediction, position_open)
+                raw_resp = gen_data.get("response", "{}")
+                try:
+                    parsed = json.loads(raw_resp) if isinstance(raw_resp, str) else {}
+                except ValueError:
+                    parsed = {}
+                regime = str(parsed.get("regime", cal["regime"]))
+                if regime not in {"bull_trend", "bear_trend", "sideways", "high_vol_chop", "none"}:
+                    regime = cal["regime"]
+                sig = str(parsed.get("signal_action", cal["signal_action"])).upper()
+                if sig not in {"BUY", "HOLD", "SELL"}:
+                    sig = cal["signal_action"]
+                conv_score = float(parsed.get("conviction_score", cal["conviction_score"]))
+                conv_score = max(0.0, min(1.0, conv_score))
+                conv_level = str(parsed.get("conviction_level", cal["conviction_level"]))
+                if conv_level not in {"very_low", "low", "moderate", "high"}:
+                    conv_level = cal["conviction_level"]
+                return LayaAlphaOutput(
+                    regime=regime,
+                    regime_probs=cal["regime_probs"],
+                    signal_action=sig,
+                    signal_probs=cal["signal_probs"],
+                    conviction_level=conv_level,
+                    conviction_score=round(conv_score, 4),
+                    latency_ms=latency_ms,
+                    execution_mode=LAYA1_EXECUTION_MODE,
+                    is_local_device=LAYA1_IS_LOCAL_DEVICE,
+                    transport="ollama_local_systemone",
+                    model=self.settings.laya_model_name,
+                    payload_token_estimate=token_est,
+                    qwen_feedback=dict(self.last_qwen_feedback),
+                )
+
             resp.raise_for_status()
             self._last_unavailable_ts = None
             data = resp.json()
@@ -270,6 +552,7 @@ class LayaAlphaAgent:
                 transport="ollama_local_systemone",
                 model=self.settings.laya_model_name,
                 payload_token_estimate=token_est,
+                qwen_feedback=dict(self.last_qwen_feedback),
             )
         except (httpx.HTTPError, httpx.TimeoutException, ValueError, KeyError) as exc:
             self._last_unavailable_ts = time.monotonic()
@@ -298,9 +581,10 @@ class LayaAlphaAgent:
                 latency_ms=latency_ms,
                 execution_mode=LAYA1_EXECUTION_MODE,
                 is_local_device=LAYA1_IS_LOCAL_DEVICE,
-                transport="local_rlcd_calibrated_fallback",
-                model=self.settings.laya_model_name,
+                transport=str(cal.get("transport", "local_rlcd_calibrated_fallback")),
+                model=str(cal.get("model", self.settings.laya_model_name)),
                 payload_token_estimate=token_est,
+                qwen_feedback=dict(self.last_qwen_feedback),
             )
         finally:
             if owns_client:

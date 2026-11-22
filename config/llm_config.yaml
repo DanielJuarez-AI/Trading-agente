@@ -22,7 +22,24 @@ qwen_orchestrator:
   timeout_seconds: 30
   max_retries: 2
   strict_json_schema: true
-  note: "Qwen 14B se invoca exclusivamente por API externa remota, NO corre en Ollama local."
+  note: "Qwen 14B se invoca por API externa remota cuando el switch está en EXTERNAL_API."
+
+# [DISPOSITIVO LOCAL - 6 GB VRAM MAX (OLLAMA)]
+qwen_local_6gb:
+  execution_mode: "LOCAL_DEVICE"
+  local_device: true
+  provider: "ollama_local_openai"
+  base_url_env: "OLLAMA_BASE_URL"
+  endpoint: "/v1/chat/completions"
+  model: "qwen2.5:7b-instruct-q4_K_M"
+  alt_ultra_light_model: "qwen2.5:3b-instruct"
+  vram_budget_gb: 6.0
+  estimated_vram_gb: 4.7
+  num_ctx: 2048
+  temperature: 0.1
+  max_tokens: 350
+  timeout_seconds: 30
+  note: "Qwen 7B cuantizado Q4_K_M (~4.7 GB VRAM + KV cache < 5.3 GB, cabe en 6 GB VRAM sin contar Laya)."
 
 # [DISPOSITIVO LOCAL - OLLAMA /v1/systemone]
 laya_alpha_agent:

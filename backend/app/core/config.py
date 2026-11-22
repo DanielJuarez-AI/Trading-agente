@@ -14,7 +14,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import yaml
 
@@ -97,13 +97,16 @@ class Settings:
     admin_control_token: str
 
     # --------------------------------------------------------------------------
-    # [API EXTERNA - NO EN DISPOSITIVO LOCAL] Qwen 14B Orquestador (System-2)
+    # [SWITCH QWEN: API EXTERNA 14B <-> LOCAL 6 GB VRAM (qwen2.5:7b-instruct-q4_K_M)]
     # --------------------------------------------------------------------------
     qwen_execution_mode: str
     qwen_is_local: bool
     qwen_api_base_url: str
     qwen_api_key: str
     qwen_model_name: str
+    qwen_local_model_name: str
+    qwen_local_vram_budget_gb: float
+    qwen_local_num_ctx: int
     qwen_temperature: float
     qwen_max_tokens: int
 
@@ -140,22 +143,39 @@ class Settings:
     risk_limits_raw: Dict[str, Any] = field(default_factory=dict)
     llm_config_raw: Dict[str, Any] = field(default_factory=dict)
 
-    def hybrid_topology_metadata(self) -> Dict[str, Any]:
+    def hybrid_topology_metadata(
+        self, active_qwen_mode: Optional[str] = None
+    ) -> Dict[str, Any]:
         """Devuelve metadatos explícitos de ubicación de cómputo de los agentes."""
-        return {
-            "qwen_orchestrator": {
-                "execution_mode": self.qwen_execution_mode,
-                "is_local_device": self.qwen_is_local,
+        mode = active_qwen_mode or self.qwen_execution_mode
+        if mode == "LOCAL_DEVICE":
+            qwen_meta = {
+                "execution_mode": "LOCAL_DEVICE",
+                "is_local_device": True,
+                "location_label": f"DISPOSITIVO LOCAL (Ollama {self.qwen_local_vram_budget_gb:.0f}GB VRAM)",
+                "endpoint": f"{self.ollama_base_url.rstrip('/')}/v1/chat/completions",
+                "model": self.qwen_local_model_name,
+                "vram_budget_gb": self.qwen_local_vram_budget_gb,
+                "num_ctx": self.qwen_local_num_ctx,
+            }
+        else:
+            qwen_meta = {
+                "execution_mode": "EXTERNAL_API",
+                "is_local_device": False,
                 "location_label": "API EXTERNA (No Local)",
                 "endpoint": self.qwen_api_base_url,
                 "model": self.qwen_model_name,
-            },
+                "vram_budget_gb": None,
+                "num_ctx": None,
+            }
+        return {
+            "qwen_orchestrator": qwen_meta,
             "laya_alpha": {
                 "execution_mode": self.laya_execution_mode,
                 "is_local_device": self.laya_is_local,
-                "location_label": "DISPOSITIVO LOCAL (Ollama /v1/systemone)",
+                "location_label": "DISPOSITIVO LOCAL (DRL Dueling A2C + Ollama /v1/systemone)",
                 "endpoint": f"{self.ollama_base_url.rstrip('/')}/v1/systemone",
-                "model": self.laya_model_name,
+                "model": f"{self.laya_model_name} + laya1_drl_v1",
             },
             "laya_guard": {
                 "execution_mode": self.laya_execution_mode,
@@ -193,6 +213,7 @@ def get_settings() -> Settings:
     )
 
     qwen_yaml = llm_yaml.get("qwen_orchestrator", {})
+    qwen_local_yaml = llm_yaml.get("qwen_local_6gb", {})
     laya_yaml = llm_yaml.get("laya_alpha_agent", {})
 
     db_env = os.getenv("SQLITE_DB_PATH", str(DATA_DIR / "trading_agent.db"))
@@ -212,9 +233,9 @@ def get_settings() -> Settings:
     return Settings(
         gateway_api_key=os.getenv("GATEWAY_API_KEY", "dev_local_gateway_key_change_me"),
         admin_control_token=os.getenv("ADMIN_CONTROL_TOKEN", "dev_admin_control_token"),
-        # [API EXTERNA - NO LOCAL] Qwen 14B
+        # [SWITCH QWEN: API EXTERNA <-> LOCAL 6 GB VRAM]
         qwen_execution_mode=os.getenv("QWEN_EXECUTION_MODE", QWEN_EXECUTION_MODE),
-        qwen_is_local=False,
+        qwen_is_local=(os.getenv("QWEN_EXECUTION_MODE", QWEN_EXECUTION_MODE) == "LOCAL_DEVICE"),
         qwen_api_base_url=os.getenv(
             "QWEN_API_BASE_URL",
             "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
@@ -223,6 +244,22 @@ def get_settings() -> Settings:
         qwen_model_name=os.getenv(
             "QWEN_MODEL_NAME",
             str(qwen_yaml.get("model", "qwen2.5-14b-instruct")),
+        ),
+        qwen_local_model_name=os.getenv(
+            "QWEN_LOCAL_MODEL_NAME",
+            str(qwen_local_yaml.get("model", "qwen2.5:7b-instruct-q4_K_M")),
+        ),
+        qwen_local_vram_budget_gb=float(
+            os.getenv(
+                "QWEN_LOCAL_VRAM_BUDGET_GB",
+                str(qwen_local_yaml.get("vram_budget_gb", 6.0)),
+            )
+        ),
+        qwen_local_num_ctx=int(
+            os.getenv(
+                "QWEN_LOCAL_NUM_CTX",
+                str(qwen_local_yaml.get("num_ctx", 2048)),
+            )
         ),
         qwen_temperature=float(qwen_yaml.get("temperature", 0.1)),
         qwen_max_tokens=int(qwen_yaml.get("max_tokens", 350)),

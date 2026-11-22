@@ -1,0 +1,54 @@
+{
+  "model_version": "laya1_drl_v1",
+  "algorithm": "Dueling Double-DQN + Advantage Actor-Critic (A2C) + Regime Head",
+  "weights_file": "laya1_drl_v1.pt",
+  "sha256": "949af2e58ab1085e1215d24c5d1ae6d2bf63d2ea139b40f7d466ca2567d81059",
+  "architecture": {
+    "class": "Laya1DRLPolicyNet",
+    "state_dim": 10,
+    "hidden_dim": 64,
+    "actions": [
+      "BUY",
+      "HOLD",
+      "SELL"
+    ],
+    "regimes": [
+      "bull_trend",
+      "bear_trend",
+      "sideways",
+      "high_vol_chop",
+      "none"
+    ]
+  },
+  "hyperparameters": {
+    "gamma": 0.95,
+    "tau": 0.05,
+    "lr": 0.0015,
+    "seed": 42,
+    "epochs_max": 45
+  },
+  "calibration_temperature": 1.5,
+  "splits_sizes": {
+    "TR": 4560,
+    "VA": 900,
+    "TE": 900
+  },
+  "metrics": {
+    "TR": {
+      "mean_step_return_bps": 5.1966,
+      "sharpe_step": 0.0233,
+      "regime_accuracy": 0.6691
+    },
+    "VA": {
+      "mean_step_return_bps": 11.4551,
+      "sharpe_step": 0.056,
+      "regime_accuracy": 0.6167
+    },
+    "TE": {
+      "mean_step_return_bps": -15.0502,
+      "sharpe_step": -0.0529,
+      "regime_accuracy": 0.5944
+    }
+  },
+  "generated_at_utc": "2026-11-22T02:49:39Z"
+}

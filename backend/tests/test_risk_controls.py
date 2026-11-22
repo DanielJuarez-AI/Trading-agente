@@ -199,5 +199,239 @@ def test_candles_endpoint_returns_ohlcv_and_emas(
             assert field in sample
         assert body["high_period"] >= body["low_period"]
 
+        af = body.get("agent_forecast")
+        assert af is not None
+        assert af["symbol"] == "NVDA"
+        for field in (
+            "pred_return_t1",
+            "projected_close_t1",
+            "conviction_score",
+            "signal_probs",
+            "regime_probs",
+            "coherence_prob",
+            "signal_strength",
+        ):
+            assert field in af
+        for act in ("BUY", "HOLD", "SELL"):
+            assert act in af["signal_probs"]
+        assert "bull_trend" in af["regime_probs"]
+
         bad = client.get("/api/candles?symbol=INVALID_TICKER")
         assert bad.status_code == 400
+
+
+def test_hourly_and_daily_interval_switch_and_candles(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from fastapi.testclient import TestClient
+    from backend.app.main import create_app
+
+    cfg = _make_settings(tmp_path, monkeypatch)
+    app = create_app(settings_override=cfg)
+    with TestClient(app) as client:
+        # Cambiar a temporalidad Hora (1h)
+        sw_1h = client.post(
+            "/api/control/switch_interval",
+            headers={"X-API-Key": cfg.gateway_api_key},
+            json={"interval": "1h"},
+        )
+        assert sw_1h.status_code == 200
+        assert sw_1h.json()["candle_interval"] == "1h"
+        assert client.get("/api/status").json()["candle_interval"] == "1h"
+
+        # Consultar velas 1h -> timestamps Unix int y horizon_label +1H
+        c_1h = client.get("/api/candles?symbol=BTC-USD&interval=1h&limit=48")
+        assert c_1h.status_code == 200
+        b1h = c_1h.json()
+        assert b1h["interval"] == "1h"
+        assert b1h["horizon_label"] == "+1H"
+        assert len(b1h["candles"]) == 48
+        assert isinstance(b1h["candles"][-1]["time"], int)
+        assert b1h["agent_forecast"]["horizon_label"] == "+1H"
+
+        # Ejecutar 1 ciclo en 1h
+        step_1h = client.post(
+            "/api/control/step",
+            headers={"X-API-Key": cfg.gateway_api_key},
+            json={"symbol": "BTC-USD", "interval": "1h"},
+        )
+        assert step_1h.status_code == 200
+        assert step_1h.json()["interval"] == "1h"
+
+        # Volver a temporalidad Día (1d)
+        sw_1d = client.post(
+            "/api/control/switch_interval",
+            headers={"X-API-Key": cfg.gateway_api_key},
+            json={"interval": "1d"},
+        )
+        assert sw_1d.status_code == 200
+        c_1d = client.get("/api/candles?symbol=NVDA&interval=1d&limit=30")
+        assert c_1d.status_code == 200
+        b1d = c_1d.json()
+        assert b1d["interval"] == "1d"
+        assert b1d["horizon_label"] == "+1D"
+        assert isinstance(b1d["candles"][-1]["time"], str)
+
+
+def test_laya1_drl_policy_inference_and_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from backend.app.core.config import ARTIFACTS_DIR
+    from backend.app.front_office.laya_alpha import LayaAlphaAgent
+
+    weights_path = ARTIFACTS_DIR / "laya1_drl_v1.pt"
+    manifest_path = ARTIFACTS_DIR / "laya1_drl_manifest.json"
+    assert weights_path.exists()
+    assert manifest_path.exists()
+
+    cfg = _make_settings(tmp_path, monkeypatch)
+    db = TradingDatabase(cfg.sqlite_db_path)
+    gateway = PrivateAuthGateway(cfg, db)
+    agent = LayaAlphaAgent(cfg, db, gateway)
+    assert agent.drl_net is not None
+
+    pred = PredictionResult(
+        symbol="NVDA",
+        candle_close_utc="2026-11-20T23:59:59Z",
+        pred_return_t1=0.008,
+        direction="UP",
+        ema_ratio=1.015,
+        vol_20=0.022,
+        rsi_14=58.0,
+        momentum_5=0.02,
+        ret_lag_1=0.004,
+        model_version="lstm_v1",
+        features_verified=True,
+    )
+    out = agent.evaluate(
+        prediction=pred, position_open=False, gateway_key=cfg.gateway_api_key
+    )
+    assert out.transport == "local_drl_dueling_a2c_v1"
+    assert out.is_local_device is True
+    assert set(out.signal_probs.keys()) == {"BUY", "HOLD", "SELL"}
+    assert sum(out.signal_probs.values()) == pytest.approx(1.0, abs=0.02)
+    assert 0.15 <= out.conviction_score <= 0.96
+
+
+def test_qwen_mode_switch_local_6gb_and_external_api(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from fastapi.testclient import TestClient
+    from backend.app.main import create_app
+
+    cfg = _make_settings(tmp_path, monkeypatch)
+    cfg.qwen_api_key = ""
+    app = create_app(settings_override=cfg)
+
+    with TestClient(app) as client:
+        # Cambiar a Qwen Local 6GB VRAM (qwen2.5:7b-instruct-q4_K_M)
+        sw_local = client.post(
+            "/api/control/switch_qwen_mode",
+            headers={"X-API-Key": cfg.gateway_api_key},
+            json={"qwen_mode": "LOCAL_DEVICE"},
+        )
+        assert sw_local.status_code == 200
+        body_local = sw_local.json()
+        assert body_local["qwen_mode"] == "LOCAL_DEVICE"
+        assert body_local["topology"]["is_local_device"] is True
+        assert body_local["topology"]["vram_budget_gb"] == 6.0
+        assert body_local["topology"]["model"] == "qwen2.5:7b-instruct-q4_K_M"
+
+        st = client.get("/api/status").json()
+        assert st["qwen_mode"] == "LOCAL_DEVICE"
+        assert st["laya1_drl_enabled"] is True
+
+        step_local = client.post(
+            "/api/control/step",
+            headers={"X-API-Key": cfg.gateway_api_key},
+            json={"symbol": "BTC-USD"},
+        )
+        assert step_local.status_code == 200
+        q_local = step_local.json()["cycle"]["qwen"]
+        assert q_local["execution_mode"] == "LOCAL_DEVICE"
+        assert q_local["is_local_device"] is True
+        assert q_local["vram_budget_gb"] == 6.0
+
+        # Volver al modo API Externa
+        sw_api = client.post(
+            "/api/control/switch_qwen_mode",
+            headers={"X-API-Key": cfg.gateway_api_key},
+            json={"qwen_mode": "EXTERNAL_API"},
+        )
+        assert sw_api.status_code == 200
+        assert sw_api.json()["qwen_mode"] == "EXTERNAL_API"
+        assert sw_api.json()["topology"]["is_local_device"] is False
+
+        step_api = client.post(
+            "/api/control/step",
+            headers={"X-API-Key": cfg.gateway_api_key},
+            json={"symbol": "NVDA"},
+        )
+        assert step_api.status_code == 200
+        q_api = step_api.json()["cycle"]["qwen"]
+        assert q_api["execution_mode"] == "EXTERNAL_API"
+        assert q_api["is_local_device"] is False
+
+
+def test_qwen_orchestrator_feedback_to_laya1_and_laya2_and_latencies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from fastapi.testclient import TestClient
+    from backend.app.main import create_app
+
+    cfg = _make_settings(tmp_path, monkeypatch)
+    cfg.qwen_api_key = ""
+    app = create_app(settings_override=cfg)
+
+    expected_lat_keys = {
+        "ingest_ms",
+        "lstm_ms",
+        "laya1_ms",
+        "qwen_ms",
+        "feedback_laya1_ms",
+        "feedback_laya2_ms",
+        "laya2_ms",
+        "risk_paper_ms",
+        "total_cycle_ms",
+    }
+
+    with TestClient(app) as client:
+        step1 = client.post(
+            "/api/control/step",
+            headers={"X-API-Key": cfg.gateway_api_key},
+            json={"symbol": "BTC-USD"},
+        )
+        assert step1.status_code == 200
+        cycle1 = step1.json()["cycle"]
+
+        assert expected_lat_keys.issubset(set(cycle1["stage_latencies_ms"].keys()))
+        assert cycle1["stage_latencies_ms"]["total_cycle_ms"] >= 0.0
+        assert "orchestrator_feedback" in cycle1["qwen"]
+        assert "to_laya1" in cycle1["feedback_applied"]
+        assert "to_laya2" in cycle1["feedback_applied"]
+        assert "guidance" in cycle1["feedback_applied"]["to_laya1"]
+        assert cycle1["feedback_applied"]["to_laya2"]["strictness_level"] in {"standard", "strict"}
+
+        # El estado expuesto por /api/status persiste el feedback y las latencias
+        st = client.get("/api/status").json()
+        assert st["laya1_feedback"].get("guidance")
+        assert st["laya2_feedback"].get("focus_rule")
+        assert expected_lat_keys.issubset(set(st["stage_latencies_ms"].keys()))
+
+        # Al ejecutar un segundo ciclo, Laya #1 y Laya #2 reciben qwen_feedback del ciclo anterior
+        step2 = client.post(
+            "/api/control/step",
+            headers={"X-API-Key": cfg.gateway_api_key},
+            json={"symbol": "BTC-USD"},
+        )
+        assert step2.status_code == 200
+        cycle2 = step2.json()["cycle"]
+        assert cycle2["laya1"]["qwen_feedback"].get("guidance")
+        assert cycle2["laya2"]["qwen_feedback"].get("focus_rule")
+
+        # Ventana 1D (24H intradía en intervalo 1h) para el gráfico del ticker
+        c1d = client.get("/api/candles?symbol=BTC-USD&interval=1h&limit=24")
+        assert c1d.status_code == 200
+        c1d_data = c1d.json()
+        assert c1d_data["interval"] == "1h"
+        assert len(c1d_data["candles"]) == 24

@@ -8,8 +8,8 @@ interface ControlPanelProps {
   onLogin: (credential: string) => Promise<void>;
   onLogout: () => Promise<void>;
   onAction: (
-    action: 'start' | 'pause' | 'stop' | 'step' | 'replay' | 'switch_ticker' | 'switch_mode' | 'benchmark',
-    payload?: { symbol?: string; mode?: 'live' | 'replay'; n_cycles?: number }
+    action: 'start' | 'pause' | 'stop' | 'step' | 'replay' | 'switch_ticker' | 'switch_mode' | 'switch_interval' | 'switch_qwen_mode' | 'benchmark',
+    payload?: { symbol?: string; mode?: 'live' | 'replay'; interval?: '1h' | '1d'; qwen_mode?: 'EXTERNAL_API' | 'LOCAL_DEVICE'; n_cycles?: number }
   ) => Promise<void>;
 }
 
@@ -27,6 +27,8 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
     : OFFICIAL_PRIMARY_TICKERS;
   const activeTicker = status?.active_ticker || 'BTC-USD';
   const sourceMode = status?.source_mode || 'replay';
+  const candleInterval = status?.candle_interval || '1d';
+  const qwenMode = status?.qwen_mode || 'EXTERNAL_API';
   const sysState = status?.system_status || 'RUNNING';
 
   const statusBadgeColor =
@@ -137,6 +139,60 @@ export const ControlPanel: React.FC<ControlPanelProps> = ({
               } disabled:opacity-50`}
             >
               Live MEXC
+            </button>
+          </div>
+
+          <div className="flex overflow-hidden rounded-lg border border-slate-700">
+            <button
+              type="button"
+              disabled={!authenticated || busy}
+              onClick={() => onAction('switch_interval', { interval: '1h' })}
+              className={`px-3 py-1.5 text-xs font-medium ${
+                candleInterval === '1h'
+                  ? 'bg-indigo-600 text-white'
+                  : 'bg-slate-950 text-slate-400 hover:text-slate-200'
+              } disabled:opacity-50`}
+            >
+              Hora (1h)
+            </button>
+            <button
+              type="button"
+              disabled={!authenticated || busy}
+              onClick={() => onAction('switch_interval', { interval: '1d' })}
+              className={`px-3 py-1.5 text-xs font-medium ${
+                candleInterval === '1d'
+                  ? 'bg-indigo-600 text-white'
+                  : 'bg-slate-950 text-slate-400 hover:text-slate-200'
+              } disabled:opacity-50`}
+            >
+              Día (1d)
+            </button>
+          </div>
+
+          <div className="flex overflow-hidden rounded-lg border border-sky-700/60">
+            <button
+              type="button"
+              disabled={!authenticated || busy}
+              onClick={() => onAction('switch_qwen_mode', { qwen_mode: 'EXTERNAL_API' })}
+              className={`px-3 py-1.5 text-xs font-medium ${
+                qwenMode === 'EXTERNAL_API'
+                  ? 'bg-sky-600 text-white'
+                  : 'bg-slate-950 text-slate-400 hover:text-slate-200'
+              } disabled:opacity-50`}
+            >
+              Qwen API (14B)
+            </button>
+            <button
+              type="button"
+              disabled={!authenticated || busy}
+              onClick={() => onAction('switch_qwen_mode', { qwen_mode: 'LOCAL_DEVICE' })}
+              className={`px-3 py-1.5 text-xs font-medium ${
+                qwenMode === 'LOCAL_DEVICE'
+                  ? 'bg-violet-600 text-white'
+                  : 'bg-slate-950 text-slate-400 hover:text-slate-200'
+              } disabled:opacity-50`}
+            >
+              Local 6GB (7B-Q4)
             </button>
           </div>
         </div>

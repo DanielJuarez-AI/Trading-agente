@@ -19,10 +19,50 @@ export interface AgentNodeMetadata {
   model: string;
 }
 
+export interface Laya1Feedback {
+  target?: string;
+  temperature_delta?: number;
+  conviction_bias?: number;
+  guidance?: string;
+  aligned_with_qwen?: boolean;
+  qwen_action?: string;
+  applied_drl_temperature?: number;
+  applied_conviction_bias?: number;
+}
+
+export interface Laya2Feedback {
+  target?: string;
+  strictness_level?: 'standard' | 'strict';
+  min_coherence_threshold?: number;
+  focus_rule?: string;
+  qwen_action?: string;
+}
+
+export interface StageLatenciesMs {
+  ingest_ms?: number;
+  lstm_ms?: number;
+  laya1_ms?: number;
+  qwen_ms?: number;
+  feedback_laya1_ms?: number;
+  feedback_laya2_ms?: number;
+  laya2_ms?: number;
+  risk_paper_ms?: number;
+  total_cycle_ms?: number;
+  updated_at?: string;
+}
+
 export interface SystemStatusResponse {
   system_status: 'RUNNING' | 'PAUSED' | 'STOPPED';
   active_ticker: string;
   source_mode: 'live' | 'replay';
+  candle_interval: '1h' | '1d';
+  qwen_mode?: 'EXTERNAL_API' | 'LOCAL_DEVICE';
+  qwen_local_model?: string;
+  qwen_local_vram_gb?: number;
+  laya1_drl_enabled?: boolean;
+  laya1_feedback?: Laya1Feedback;
+  laya2_feedback?: Laya2Feedback;
+  stage_latencies_ms?: StageLatenciesMs;
   simulation_profile: string;
   profile_config: {
     name: string;
@@ -74,6 +114,7 @@ export interface DecisionRecord {
     is_local_device?: boolean;
     transport?: string;
     latency_ms?: number;
+    qwen_feedback?: Laya1Feedback;
   };
   qwen_json: {
     action?: string;
@@ -84,6 +125,11 @@ export interface DecisionRecord {
     is_local_device?: boolean;
     api_endpoint?: string;
     latency_ms?: number;
+    orchestrator_feedback?: {
+      to_laya1?: Laya1Feedback;
+      to_laya2?: Laya2Feedback;
+    };
+    stage_latencies_ms?: StageLatenciesMs;
   };
   laya2_json: {
     approved?: boolean;
@@ -93,6 +139,7 @@ export interface DecisionRecord {
     execution_mode?: string;
     is_local_device?: boolean;
     latency_ms?: number;
+    qwen_feedback?: Laya2Feedback;
   };
   risk_status: 'APPROVED' | 'REJECTED';
   risk_reason: string;
@@ -135,7 +182,8 @@ export interface BenchmarkResponse {
 }
 
 export interface CandlePoint {
-  time: string;
+  time: string | number;
+  label?: string;
   open_time: string;
   close_time: string;
   open: number;
@@ -148,14 +196,47 @@ export interface CandlePoint {
 }
 
 export interface CandleMarker {
-  time: string;
+  time: string | number;
   action: 'BUY' | 'SELL';
   risk_status: string;
   model_pred: number;
 }
 
+export interface AgentForecast {
+  symbol: string;
+  interval?: '1h' | '1d';
+  horizon_label?: string;
+  next_time: string | number;
+  pred_return_t1: number;
+  pred_return_pct: number;
+  direction: 'UP' | 'DOWN' | 'FLAT';
+  projected_close_t1: number;
+  band_upper_t1: number;
+  band_lower_t1: number;
+  forecast_candle?: {
+    time: string | number;
+    open: number;
+    high: number;
+    low: number;
+    close: number;
+  };
+  vol_20: number;
+  ema_ratio: number;
+  rsi_14: number;
+  signal_action: 'BUY' | 'HOLD' | 'SELL';
+  signal_probs: Record<string, number>;
+  regime: string;
+  regime_probs: Record<string, number>;
+  conviction_level: string;
+  conviction_score: number;
+  coherence_prob: number;
+  signal_strength: number;
+}
+
 export interface CandlesResponse {
   symbol: string;
+  interval?: '1h' | '1d';
+  horizon_label?: string;
   data_source: string;
   last_close: number;
   prev_close: number;
@@ -164,6 +245,7 @@ export interface CandlesResponse {
   low_period: number;
   candles: CandlePoint[];
   markers: CandleMarker[];
+  agent_forecast?: AgentForecast | null;
 }
 
 const API_BASE = '';
@@ -204,15 +286,16 @@ export const apiClient = {
     requestJson<{ items: DecisionRecord[] }>(`/api/decisions?limit=${limit}`),
   getErrors: (limit = 50) =>
     requestJson<{ items: ErrorLogRecord[] }>(`/api/errors?limit=${limit}`),
-  getCandles: (symbol?: string, limit = 140) => {
+  getCandles: (symbol?: string, limit = 140, interval?: '1h' | '1d') => {
     const params = new URLSearchParams({ limit: String(limit) });
     if (symbol) params.set('symbol', symbol);
+    if (interval) params.set('interval', interval);
     return requestJson<CandlesResponse>(`/api/candles?${params.toString()}`);
   },
   getBenchmark: () => requestJson<BenchmarkResponse>('/api/benchmark'),
   control: (
-    action: 'start' | 'pause' | 'stop' | 'step' | 'replay' | 'switch_ticker' | 'switch_mode' | 'benchmark',
-    payload?: { symbol?: string; mode?: 'live' | 'replay'; n_cycles?: number }
+    action: 'start' | 'pause' | 'stop' | 'step' | 'replay' | 'switch_ticker' | 'switch_mode' | 'switch_interval' | 'switch_qwen_mode' | 'benchmark',
+    payload?: { symbol?: string; mode?: 'live' | 'replay'; interval?: '1h' | '1d'; qwen_mode?: 'EXTERNAL_API' | 'LOCAL_DEVICE'; n_cycles?: number }
   ) =>
     requestJson<Record<string, unknown>>(`/api/control/${action}`, {
       method: 'POST',

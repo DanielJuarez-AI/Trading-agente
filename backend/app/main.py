@@ -46,6 +46,8 @@ def create_app(settings_override: Optional[Settings] = None) -> FastAPI:
         default_mode="replay",
         profile_name=cfg.simulation_profile,
         initial_capital=cfg.profile_config.initial_capital,
+        default_interval=cfg.candle_interval,
+        default_qwen_mode=cfg.qwen_execution_mode,
     )
 
     gateway = PrivateAuthGateway(cfg, db)

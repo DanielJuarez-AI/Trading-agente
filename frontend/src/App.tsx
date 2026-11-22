@@ -8,6 +8,7 @@ import {
 } from './api/client';
 import { AgentConstellation } from './components/AgentConstellation';
 import { AuditLogTable } from './components/AuditLogTable';
+import { ConstellationFlowMap } from './components/ConstellationFlowMap';
 import { ControlPanel } from './components/ControlPanel';
 import { MarketCard } from './components/MarketCard';
 import { PortfolioMetrics } from './components/PortfolioMetrics';
@@ -77,8 +78,8 @@ export function App() {
   };
 
   const handleAction = async (
-    action: 'start' | 'pause' | 'stop' | 'step' | 'replay' | 'switch_ticker' | 'switch_mode' | 'benchmark',
-    payload?: { symbol?: string; mode?: 'live' | 'replay'; n_cycles?: number }
+    action: 'start' | 'pause' | 'stop' | 'step' | 'replay' | 'switch_ticker' | 'switch_mode' | 'switch_interval' | 'switch_qwen_mode' | 'benchmark',
+    payload?: { symbol?: string; mode?: 'live' | 'replay'; interval?: '1h' | '1d'; qwen_mode?: 'EXTERNAL_API' | 'LOCAL_DEVICE'; n_cycles?: number }
   ) => {
     setBusy(true);
     setBanner(null);
@@ -135,6 +136,8 @@ export function App() {
         <PortfolioMetrics status={status} benchmark={benchmark} />
 
         <AuditLogTable decisions={decisions} errors={errors} />
+
+        <ConstellationFlowMap status={status} latestDecision={decisions[0] || null} />
       </div>
     </div>
   );
