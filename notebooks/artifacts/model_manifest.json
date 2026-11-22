@@ -1,0 +1,86 @@
+{
+  "model_version": "lstm_v1",
+  "model_file": "lstm_v1.pt",
+  "scaler_file": "scaler_v1.joblib",
+  "architecture": {
+    "class": "LSTMRegressor",
+    "input_dim": 8,
+    "hidden_dim": 32,
+    "num_layers": 1,
+    "dropout": 0.1
+  },
+  "seq_len": 10,
+  "feature_columns": [
+    "ret_lag_1",
+    "ret_lag_2",
+    "ret_lag_3",
+    "ret_lag_5",
+    "ema_ratio",
+    "vol_20",
+    "rsi_14",
+    "momentum_5"
+  ],
+  "primary_tickers": [
+    "AAPL",
+    "MSFT",
+    "NVDA",
+    "TSLA",
+    "HWM",
+    "JPM",
+    "GOOGL",
+    "AMZN",
+    "META",
+    "LMT",
+    "WM",
+    "LULU",
+    "DIS",
+    "V",
+    "MA",
+    "BTC-USD",
+    "SPY",
+    "QQQ",
+    "NFLX",
+    "AMD",
+    "CRM",
+    "ADBE",
+    "PYPL",
+    "COST",
+    "HD",
+    "UNH",
+    "JNJ",
+    "PG",
+    "KO",
+    "WMT"
+  ],
+  "sha256": {
+    "model": "abdb2a6da201b34297a793ab254313bc42ab2b29af634919728f8d8418b6452a",
+    "scaler": "12f7c36d4057d0b68aae758efdee834f92154dde05208f697a3cc0dc50842989"
+  },
+  "splits_summary": {
+    "reference_ticker": "BTC-USD",
+    "TR_rows": 751,
+    "TR_start": "2023-12-12T23:59:59Z",
+    "TR_end": "2025-12-31T23:59:59Z",
+    "VA_rows": 161,
+    "VA_start": "2026-01-01T23:59:59Z",
+    "VA_end": "2026-06-10T23:59:59Z",
+    "TE_rows": 162,
+    "TE_start": "2026-06-11T23:59:59Z",
+    "TE_end": "2026-11-19T23:59:59Z"
+  },
+  "metrics_TE": {
+    "MAE": 0.01576201245188713,
+    "RMSE": 0.023524275049567223,
+    "Directional_Accuracy": 0.49099099099099097,
+    "BTC_TE_Win_Rate_With_Filter": 0.8333333333333334,
+    "BTC_TE_Max_Drawdown_With_Filter": 0.27274983075671405,
+    "BTC_TE_Net_Return_No_Filter": 0.04339543446223601,
+    "BTC_TE_Net_Return_With_Filter": 0.034163995901665474
+  },
+  "training_environment": {
+    "target_gpu": "NVIDIA Tesla T4 (Colab) / CPU reproducible fallback",
+    "pytorch_version": "2.15.0+cpu",
+    "cuda_available": false,
+    "generated_at_utc": "2026-11-22T01:11:17Z"
+  }
+}
