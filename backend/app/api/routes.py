@@ -12,7 +12,9 @@ import json
 from datetime import datetime, timedelta
 from typing import Any, Dict, Optional
 
+import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from backend.app.back_office.database import DuplicateCandleError
@@ -26,12 +28,13 @@ from backend.app.back_office.paper_engine import (
     SystemStoppedError,
 )
 from backend.app.benchmark.comparator import run_three_lane_benchmark
-from backend.app.core.config import EXPORTS_DIR
+from backend.app.core.config import EXPORTS_DIR, get_app_version_info
 from backend.app.core.security import (
     SESSION_COOKIE_NAME,
     PrivateAuthGateway,
     require_gateway_auth,
 )
+from backend.app.front_office.features import _compute_rsi
 from backend.app.front_office.laya_alpha import LLMServiceUnavailableError
 from backend.app.orchestrator.qwen_agent import QwenInvalidOutputError
 
@@ -122,8 +125,13 @@ def get_system_status(request: Request) -> Dict[str, Any]:
     laya1_feedback = _parse_state_json(db, "laya1_feedback_json")
     laya2_feedback = _parse_state_json(db, "laya2_feedback_json")
     stage_latencies_ms = _parse_state_json(db, "last_stage_latencies_json")
+    ver_info = get_app_version_info()
 
     return {
+        "app_version": ver_info["version"],
+        "release_milestone": ver_info["release_milestone"],
+        "commit_count": ver_info["commit_count"],
+        "git_sha": ver_info["git_sha"],
         "system_status": system_status,
         "active_ticker": active_ticker,
         "source_mode": source_mode,
@@ -195,11 +203,11 @@ def get_errors(request: Request, limit: int = 100) -> Dict[str, Any]:
 def get_ticker_candles(
     request: Request,
     symbol: Optional[str] = None,
-    limit: int = 140,
+    limit: int = 200,
     mode: Optional[str] = None,
     interval: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Devuelve velas OHLCV cerradas (1h o 1d), EMA10/EMA20, marcadores y pronóstico del agente."""
+    """Devuelve velas OHLCV cerradas (1h o 1d), EMA10/EMA20, RSI-14, marcadores y pronóstico del agente."""
     settings = request.app.state.settings
     db = request.app.state.db
     market_client = request.app.state.market_client
@@ -218,11 +226,14 @@ def get_ticker_candles(
             detail=f"Temporalidad inválida '{tf}'. Opciones permitidas: '1h' o '1d'.",
         )
 
+    clamped_limit = max(1, min(int(limit), 300))
     effective_mode = mode or db.get_state("source_mode", "replay") or "replay"
     data_source = "replay"
     if effective_mode == "live":
         try:
-            df = market_client.fetch_live_candles(symbol=sym, interval=tf, limit=max(limit, 140))
+            df = market_client.fetch_live_candles(
+                symbol=sym, interval=tf, limit=max(clamped_limit + 50, 250)
+            )
             data_source = "live"
         except Exception:
             df = market_client.load_replay_candles(symbol=sym, interval=tf)
@@ -234,8 +245,8 @@ def get_ticker_candles(
     close_series = df["close"].astype(float)
     df["ema10"] = close_series.ewm(span=10, adjust=False).mean()
     df["ema20"] = close_series.ewm(span=20, adjust=False).mean()
+    df["rsi_14"] = _compute_rsi(close_series, period=14).fillna(50.0)
 
-    clamped_limit = max(1, min(int(limit), 300))
     view_df = df.tail(clamped_limit).reset_index(drop=True)
 
     candles = []
@@ -263,6 +274,7 @@ def get_ticker_candles(
                 "volume": round(float(row["volume"]), 2),
                 "ema10": round(float(row["ema10"]), 4),
                 "ema20": round(float(row["ema20"]), 4),
+                "rsi_14": round(float(row["rsi_14"]), 2),
             }
         )
 
@@ -271,6 +283,7 @@ def get_ticker_candles(
     change_pct_1d = ((last_close - prev_close) / prev_close * 100.0) if prev_close > 0 else 0.0
     high_period = float(view_df["high"].max()) if not view_df.empty else 0.0
     low_period = float(view_df["low"].min()) if not view_df.empty else 0.0
+    last_rsi_14 = float(view_df["rsi_14"].iloc[-1]) if not view_df.empty else 50.0
 
     # Marcadores cronológicos de operaciones BUY/SELL del agente en el ticker y temporalidad
     markers_by_time: Dict[Any, Dict[str, Any]] = {}
@@ -303,11 +316,15 @@ def get_ticker_candles(
 
     horizon_label = "+1H" if tf == "1h" else "+1D"
 
-    # Pronóstico en vivo del agente (LSTM T4 + Laya #1 + Coherencia Laya #2)
+    # Pronóstico en vivo del agente (Quant v2 + LSTM T4 + Laya #1 + Coherencia Laya #2)
     agent_forecast: Optional[Dict[str, Any]] = None
     if len(df) >= 35 and candles:
-        prediction = request.app.state.predictor.predict_from_candles(df, symbol=sym)
-        portfolio = request.app.state.paper_engine.get_portfolio_state(current_price=last_close)
+        prediction = request.app.state.predictor.predict_from_candles(
+            df, symbol=sym, interval=tf
+        )
+        portfolio = request.app.state.paper_engine.get_portfolio_state(
+            current_price=last_close, symbol=sym
+        )
         position_open = (
             portfolio.position_qty >= settings.min_lot_size
             and portfolio.active_symbol == sym
@@ -325,6 +342,12 @@ def get_ticker_candles(
                 datetime.strptime(str(candles[-1]["time"]), "%Y-%m-%d") + timedelta(days=1)
             ).strftime("%Y-%m-%d")
         projected_close_t1 = last_close * (1.0 + prediction.pred_return_t1)
+        proj_rsi_series = _compute_rsi(
+            pd.concat([close_series, pd.Series([projected_close_t1])], ignore_index=True),
+            period=14,
+        )
+        proj_rsi_raw = proj_rsi_series.iloc[-1]
+        proj_rsi = float(proj_rsi_raw) if pd.notna(proj_rsi_raw) else float(prediction.rsi_14)
         signal_strength = min(
             1.0, abs(prediction.pred_return_t1) / max(prediction.vol_20, 1e-6)
         )
@@ -339,6 +362,7 @@ def get_ticker_candles(
             "pred_return_pct": round(prediction.pred_return_t1 * 100.0, 4),
             "direction": prediction.direction,
             "projected_close_t1": round(projected_close_t1, 4),
+            "projected_rsi_t1": round(proj_rsi, 2),
             "band_upper_t1": fc_upper,
             "band_lower_t1": fc_lower,
             "forecast_candle": {
@@ -371,6 +395,7 @@ def get_ticker_candles(
         "change_pct_1d": round(change_pct_1d, 4),
         "high_period": round(high_period, 4),
         "low_period": round(low_period, 4),
+        "last_rsi_14": round(last_rsi_14, 2),
         "candles": candles,
         "markers": markers,
         "agent_forecast": agent_forecast,
@@ -378,20 +403,26 @@ def get_ticker_candles(
 
 
 @router.get("/benchmark")
-def get_benchmark(request: Request) -> Dict[str, Any]:
+def get_benchmark(
+    request: Request,
+    interval: Optional[str] = None,
+    symbol: Optional[str] = None,
+) -> Dict[str, Any]:
     summary_path = EXPORTS_DIR / "benchmark_summary.json"
-    if summary_path.exists():
+    if interval is None and symbol is None and summary_path.exists():
         return json.loads(summary_path.read_text(encoding="utf-8"))
 
     settings = request.app.state.settings
     db = request.app.state.db
-    active_ticker = db.get_state("active_ticker", settings.trading_symbol) or settings.trading_symbol
+    active_ticker = symbol or db.get_state("active_ticker", settings.trading_symbol) or settings.trading_symbol
+    tf = interval or db.get_state("candle_interval", settings.candle_interval) or "1d"
     return run_three_lane_benchmark(
         symbol=active_ticker,
         n_cycles=25,
         settings=settings,
         predictor=request.app.state.predictor,
         export_csv=True,
+        interval=tf,
     )
 
 
@@ -492,11 +523,12 @@ def control_action(
                 )
                 return {"mode": "live", "interval": tf, "cycle": res}
             else:
-                # En replay avanza 1 nueva vela no procesada del histórico en la temporalidad activa
+                # En replay avanza 1 nueva vela no procesada dentro de la ventana visible de 200 velas
                 full_df = request.app.state.market_client.load_replay_candles(
                     symbol=sym, interval=tf
                 )
-                for idx in range(45, len(full_df)):
+                start_search_idx = max(45, len(full_df) - 200)
+                for idx in range(start_search_idx, len(full_df)):
                     close_t = str(full_df.iloc[idx]["close_time"])
                     if not db.is_candle_processed(sym, tf, close_t, "replay"):
                         res = scheduler.process_candle_window(
@@ -539,15 +571,49 @@ def control_action(
 
     if action == "benchmark":
         sym = body.symbol or db.get_state("active_ticker", settings.trading_symbol) or settings.trading_symbol
+        tf = body.interval or db.get_state("candle_interval", settings.candle_interval) or "1d"
         return run_three_lane_benchmark(
             symbol=sym,
             n_cycles=body.n_cycles,
             settings=settings,
             predictor=request.app.state.predictor,
             export_csv=True,
+            interval=tf,
         )
 
     raise HTTPException(
         status_code=status.HTTP_404_NOT_FOUND,
         detail=f"Acción de control desconocida: {action}",
+    )
+
+
+@router.get("/telemetry")
+def get_system_telemetry(request: Request) -> Dict[str, Any]:
+    """Devuelve telemetría hardware GPU/VRAM, modelos Ollama activos y estado de agentes."""
+    telemetry = request.app.state.telemetry
+    scheduler = request.app.state.scheduler
+    return telemetry.get_snapshot(daemon_state=scheduler.daemon_status())
+
+
+@router.get("/stream/events")
+async def stream_pipeline_events(request: Request) -> StreamingResponse:
+    """Flujo Server-Sent Events (SSE) con los pasos en vivo del pipeline multi-agente."""
+    event_bus = request.app.state.event_bus
+
+    async def event_generator():
+        async for ev in event_bus.stream():
+            if await request.is_disconnected():
+                break
+            ev_name = ev.get("event", "message")
+            data_json = json.dumps(ev, ensure_ascii=False)
+            yield f"event: {ev_name}\ndata: {data_json}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )

@@ -31,15 +31,15 @@ qwen_local_6gb:
   provider: "ollama_local_openai"
   base_url_env: "OLLAMA_BASE_URL"
   endpoint: "/v1/chat/completions"
-  model: "qwen2.5:7b-instruct-q4_K_M"
+  model: "qwen2.5-3b-quant:latest"
   alt_ultra_light_model: "qwen2.5:3b-instruct"
   vram_budget_gb: 6.0
-  estimated_vram_gb: 4.7
-  num_ctx: 2048
+  estimated_vram_gb: 2.5
+  num_ctx: 4096
   temperature: 0.1
-  max_tokens: 350
+  max_tokens: 450
   timeout_seconds: 30
-  note: "Qwen 7B cuantizado Q4_K_M (~4.7 GB VRAM + KV cache < 5.3 GB, cabe en 6 GB VRAM sin contar Laya)."
+  note: "Qwen 2.5 3B Instruct real cuantizado (~2.5 GB VRAM con KV cache 4K), corre 100% en GPU RTX 4050 6GB junto a Laya."
 
 # [DISPOSITIVO LOCAL - OLLAMA /v1/systemone]
 laya_alpha_agent:

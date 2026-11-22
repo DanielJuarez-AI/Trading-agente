@@ -109,9 +109,14 @@ export function App() {
               Front Office (LSTM T4 + Laya #1 Local) → Qwen 14B (API Externa Remota) → Middle Office (Laya #2 Local + Risk Gate) → Paper Engine
             </p>
           </div>
-          <span className="rounded-lg border border-sky-500/30 bg-sky-500/10 px-3 py-1.5 text-xs font-medium text-sky-300">
-            Universo Activo: 30 Tickers
-          </span>
+          <div className="flex items-center gap-2">
+            <span className="rounded-lg border border-fuchsia-500/40 bg-fuchsia-500/15 px-3 py-1.5 text-xs font-mono font-semibold text-fuchsia-300">
+              {status?.app_version || 'v0.1.10'}
+            </span>
+            <span className="rounded-lg border border-sky-500/30 bg-sky-500/10 px-3 py-1.5 text-xs font-medium text-sky-300">
+              Universo Activo: 30 Tickers
+            </span>
+          </div>
         </header>
 
         {banner && (

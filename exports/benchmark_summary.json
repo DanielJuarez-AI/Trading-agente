@@ -1,5 +1,6 @@
 {
   "symbol": "BTC-USD",
+  "interval": "1d",
   "cycles_evaluated": 25,
   "profile": "agent_paper",
   "topology": {
@@ -15,15 +16,15 @@
     "laya_alpha": {
       "execution_mode": "LOCAL_DEVICE",
       "is_local_device": true,
-      "location_label": "DISPOSITIVO LOCAL (DRL Dueling A2C + Ollama /v1/systemone)",
-      "endpoint": "http://127.0.0.1:11434/v1/systemone",
-      "model": "laya:latest + laya1_drl_v1"
+      "location_label": "DISPOSITIVO LOCAL (DRL Dueling A2C PyTorch)",
+      "endpoint": "pytorch://laya1_drl_v1.pt (Ollama /v1/systemone fallback en strict_live)",
+      "model": "laya1_drl_v1 + laya:latest"
     },
     "laya_guard": {
       "execution_mode": "LOCAL_DEVICE",
       "is_local_device": true,
-      "location_label": "DISPOSITIVO LOCAL (Ollama /v1/systemone)",
-      "endpoint": "http://127.0.0.1:11434/v1/systemone",
+      "location_label": "DISPOSITIVO LOCAL (Ollama /api/generate + /v1/systemone)",
+      "endpoint": "http://127.0.0.1:11434/api/generate",
       "model": "laya:latest"
     }
   },
@@ -37,20 +38,32 @@
       "win_rate": "No definido",
       "closed_trades": 0,
       "total_orders": 0,
-      "avg_latency_ms": 4.67,
-      "rejected_actions": 1
+      "avg_latency_ms": 19.46,
+      "rejected_actions": 0,
+      "sharpe_ratio": 0.0,
+      "sortino_ratio": 0.0,
+      "calmar_ratio": 0.0,
+      "profit_factor": 0.0,
+      "expectancy": 0.0,
+      "exposure_pct": 0.0
     },
     {
       "strategy": "2_Agente_DualLaya_Qwen",
       "initial_capital": 50000.0,
-      "final_equity": 38852.42,
-      "net_return_pct": -22.2952,
-      "max_drawdown_pct": 22.6787,
-      "win_rate": 0.0,
-      "closed_trades": 1,
-      "total_orders": 2,
-      "avg_latency_ms": 473.38,
-      "rejected_actions": 1
+      "final_equity": 50000.0,
+      "net_return_pct": 0.0,
+      "max_drawdown_pct": 0.0,
+      "win_rate": "No definido",
+      "closed_trades": 0,
+      "total_orders": 0,
+      "avg_latency_ms": 555.63,
+      "rejected_actions": 25,
+      "sharpe_ratio": 0.0,
+      "sortino_ratio": 0.0,
+      "calmar_ratio": 0.0,
+      "profit_factor": 0.0,
+      "expectancy": 0.0,
+      "exposure_pct": 0.0
     },
     {
       "strategy": "3_Buy_And_Hold",
@@ -62,8 +75,266 @@
       "closed_trades": 0,
       "total_orders": 1,
       "avg_latency_ms": 0.05,
-      "rejected_actions": 0
+      "rejected_actions": 0,
+      "sharpe_ratio": -8.216,
+      "sortino_ratio": -5.934,
+      "calmar_ratio": -0.986,
+      "profit_factor": 0.0,
+      "expectancy": 0.0,
+      "exposure_pct": 100.0
     }
   ],
-  "interpretation": "En la ventana evaluada de 25 ciclos sobre BTC-USD, la capa LLM/Laya obtuvo retorno -22.30% (vs +0.00% sin LLM y -27.27% Buy & Hold) con mayor latencia (473.4 ms), priorizando preservación de capital y trazabilidad auditable."
+  "equity_curve": [
+    {
+      "step": 1,
+      "time": "2026-10-27",
+      "candle_close_utc": "2026-10-27T23:59:59Z",
+      "lane1_equity": 50000.0,
+      "lane2_equity": 50000.0,
+      "lane3_equity": 49975.02,
+      "lane2_drawdown_pct": 0.0,
+      "lane3_drawdown_pct": 0.05
+    },
+    {
+      "step": 2,
+      "time": "2026-10-28",
+      "candle_close_utc": "2026-10-28T23:59:59Z",
+      "lane1_equity": 50000.0,
+      "lane2_equity": 50000.0,
+      "lane3_equity": 50261.03,
+      "lane2_drawdown_pct": 0.0,
+      "lane3_drawdown_pct": 0.0
+    },
+    {
+      "step": 3,
+      "time": "2026-10-29",
+      "candle_close_utc": "2026-10-29T23:59:59Z",
+      "lane1_equity": 50000.0,
+      "lane2_equity": 50000.0,
+      "lane3_equity": 48101.28,
+      "lane2_drawdown_pct": 0.0,
+      "lane3_drawdown_pct": 4.2971
+    },
+    {
+      "step": 4,
+      "time": "2026-10-30",
+      "candle_close_utc": "2026-10-30T23:59:59Z",
+      "lane1_equity": 50000.0,
+      "lane2_equity": 50000.0,
+      "lane3_equity": 47744.53,
+      "lane2_drawdown_pct": 0.0,
+      "lane3_drawdown_pct": 5.0069
+    },
+    {
+      "step": 5,
+      "time": "2026-10-31",
+      "candle_close_utc": "2026-10-31T23:59:59Z",
+      "lane1_equity": 50000.0,
+      "lane2_equity": 50000.0,
+      "lane3_equity": 47890.8,
+      "lane2_drawdown_pct": 0.0,
+      "lane3_drawdown_pct": 4.7158
+    },
+    {
+      "step": 6,
+      "time": "2026-11-01",
+      "candle_close_utc": "2026-11-01T23:59:59Z",
+      "lane1_equity": 50000.0,
+      "lane2_equity": 50000.0,
+      "lane3_equity": 48394.0,
+      "lane2_drawdown_pct": 0.0,
+      "lane3_drawdown_pct": 3.7147
+    },
+    {
+      "step": 7,
+      "time": "2026-11-02",
+      "candle_close_utc": "2026-11-02T23:59:59Z",
+      "lane1_equity": 50000.0,
+      "lane2_equity": 50000.0,
+      "lane3_equity": 47422.4,
+      "lane2_drawdown_pct": 0.0,
+      "lane3_drawdown_pct": 5.6478
+    },
+    {
+      "step": 8,
+      "time": "2026-11-03",
+      "candle_close_utc": "2026-11-03T23:59:59Z",
+      "lane1_equity": 50000.0,
+      "lane2_equity": 50000.0,
+      "lane3_equity": 47835.33,
+      "lane2_drawdown_pct": 0.0,
+      "lane3_drawdown_pct": 4.8262
+    },
+    {
+      "step": 9,
+      "time": "2026-11-04",
+      "candle_close_utc": "2026-11-04T23:59:59Z",
+      "lane1_equity": 50000.0,
+      "lane2_equity": 50000.0,
+      "lane3_equity": 49727.79,
+      "lane2_drawdown_pct": 0.0,
+      "lane3_drawdown_pct": 1.0609
+    },
+    {
+      "step": 10,
+      "time": "2026-11-05",
+      "candle_close_utc": "2026-11-05T23:59:59Z",
+      "lane1_equity": 50000.0,
+      "lane2_equity": 50000.0,
+      "lane3_equity": 46967.76,
+      "lane2_drawdown_pct": 0.0,
+      "lane3_drawdown_pct": 6.5523
+    },
+    {
+      "step": 11,
+      "time": "2026-11-06",
+      "candle_close_utc": "2026-11-06T23:59:59Z",
+      "lane1_equity": 50000.0,
+      "lane2_equity": 50000.0,
+      "lane3_equity": 46847.06,
+      "lane2_drawdown_pct": 0.0,
+      "lane3_drawdown_pct": 6.7925
+    },
+    {
+      "step": 12,
+      "time": "2026-11-07",
+      "candle_close_utc": "2026-11-07T23:59:59Z",
+      "lane1_equity": 50000.0,
+      "lane2_equity": 50000.0,
+      "lane3_equity": 46847.46,
+      "lane2_drawdown_pct": 0.0,
+      "lane3_drawdown_pct": 6.7917
+    },
+    {
+      "step": 13,
+      "time": "2026-11-08",
+      "candle_close_utc": "2026-11-08T23:59:59Z",
+      "lane1_equity": 50000.0,
+      "lane2_equity": 50000.0,
+      "lane3_equity": 46128.3,
+      "lane2_drawdown_pct": 0.0,
+      "lane3_drawdown_pct": 8.2225
+    },
+    {
+      "step": 14,
+      "time": "2026-11-09",
+      "candle_close_utc": "2026-11-09T23:59:59Z",
+      "lane1_equity": 50000.0,
+      "lane2_equity": 50000.0,
+      "lane3_equity": 46523.15,
+      "lane2_drawdown_pct": 0.0,
+      "lane3_drawdown_pct": 7.4369
+    },
+    {
+      "step": 15,
+      "time": "2026-11-10",
+      "candle_close_utc": "2026-11-10T23:59:59Z",
+      "lane1_equity": 50000.0,
+      "lane2_equity": 50000.0,
+      "lane3_equity": 45593.68,
+      "lane2_drawdown_pct": 0.0,
+      "lane3_drawdown_pct": 9.2862
+    },
+    {
+      "step": 16,
+      "time": "2026-11-11",
+      "candle_close_utc": "2026-11-11T23:59:59Z",
+      "lane1_equity": 50000.0,
+      "lane2_equity": 50000.0,
+      "lane3_equity": 45744.78,
+      "lane2_drawdown_pct": 0.0,
+      "lane3_drawdown_pct": 8.9856
+    },
+    {
+      "step": 17,
+      "time": "2026-11-12",
+      "candle_close_utc": "2026-11-12T23:59:59Z",
+      "lane1_equity": 50000.0,
+      "lane2_equity": 50000.0,
+      "lane3_equity": 44123.65,
+      "lane2_drawdown_pct": 0.0,
+      "lane3_drawdown_pct": 12.211
+    },
+    {
+      "step": 18,
+      "time": "2026-11-13",
+      "candle_close_utc": "2026-11-13T23:59:59Z",
+      "lane1_equity": 50000.0,
+      "lane2_equity": 50000.0,
+      "lane3_equity": 42210.51,
+      "lane2_drawdown_pct": 0.0,
+      "lane3_drawdown_pct": 16.0174
+    },
+    {
+      "step": 19,
+      "time": "2026-11-14",
+      "candle_close_utc": "2026-11-14T23:59:59Z",
+      "lane1_equity": 50000.0,
+      "lane2_equity": 50000.0,
+      "lane3_equity": 39661.94,
+      "lane2_drawdown_pct": 0.0,
+      "lane3_drawdown_pct": 21.0881
+    },
+    {
+      "step": 20,
+      "time": "2026-11-15",
+      "candle_close_utc": "2026-11-15T23:59:59Z",
+      "lane1_equity": 50000.0,
+      "lane2_equity": 50000.0,
+      "lane3_equity": 40389.81,
+      "lane2_drawdown_pct": 0.0,
+      "lane3_drawdown_pct": 19.6399
+    },
+    {
+      "step": 21,
+      "time": "2026-11-16",
+      "candle_close_utc": "2026-11-16T23:59:59Z",
+      "lane1_equity": 50000.0,
+      "lane2_equity": 50000.0,
+      "lane3_equity": 40112.01,
+      "lane2_drawdown_pct": 0.0,
+      "lane3_drawdown_pct": 20.1926
+    },
+    {
+      "step": 22,
+      "time": "2026-11-17",
+      "candle_close_utc": "2026-11-17T23:59:59Z",
+      "lane1_equity": 50000.0,
+      "lane2_equity": 50000.0,
+      "lane3_equity": 40135.57,
+      "lane2_drawdown_pct": 0.0,
+      "lane3_drawdown_pct": 20.1457
+    },
+    {
+      "step": 23,
+      "time": "2026-11-18",
+      "candle_close_utc": "2026-11-18T23:59:59Z",
+      "lane1_equity": 50000.0,
+      "lane2_equity": 50000.0,
+      "lane3_equity": 38956.48,
+      "lane2_drawdown_pct": 0.0,
+      "lane3_drawdown_pct": 22.4917
+    },
+    {
+      "step": 24,
+      "time": "2026-11-19",
+      "candle_close_utc": "2026-11-19T23:59:59Z",
+      "lane1_equity": 50000.0,
+      "lane2_equity": 50000.0,
+      "lane3_equity": 38285.24,
+      "lane2_drawdown_pct": 0.0,
+      "lane3_drawdown_pct": 23.8272
+    },
+    {
+      "step": 25,
+      "time": "2026-11-20",
+      "candle_close_utc": "2026-11-20T23:59:59Z",
+      "lane1_equity": 50000.0,
+      "lane2_equity": 50000.0,
+      "lane3_equity": 36366.44,
+      "lane2_drawdown_pct": 0.0,
+      "lane3_drawdown_pct": 27.6448
+    }
+  ],
+  "interpretation": "En la ventana evaluada de 25 ciclos sobre BTC-USD, la capa LLM/Laya obtuvo retorno +0.00% (vs +0.00% sin LLM y -27.27% Buy & Hold) con mayor latencia (555.6 ms), priorizando preservación de capital y trazabilidad auditable."
 }

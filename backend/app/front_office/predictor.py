@@ -1,9 +1,10 @@
 """
-Front Office - Predictor Cuantitativo (Modelo MLP / LSTM entrenado en Fase 1 / T4).
+Front Office - Predictor Cuantitativo Multi-Temporalidad (LSTM T4 + XGBoost Walk-Forward 1h/1d).
 
-Carga los artefactos congelados (model_manifest.json, scaler_v1.joblib y lstm_v1.pt),
+Carga los artefactos congelados (model_manifest.json, scaler_v1.joblib, lstm_v1.pt,
+y quant_v2_manifest.json + quant_xgb_1d.joblib / quant_xgb_1h.joblib),
 verifica su integridad SHA-256 y el contrato exacto de columnas antes de emitir
-el rendimiento estimado r_hat_{t+1} en escala original.
+el rendimiento estimado r_hat_{t+1} en escala original y series históricas sin look-ahead.
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import joblib
 import numpy as np
@@ -23,6 +24,7 @@ import torch.nn as nn
 from backend.app.core.config import ARTIFACTS_DIR
 from backend.app.front_office.features import (
     DEFAULT_SEQ_LEN,
+    ENHANCED_FEATURE_COLUMNS,
     FEATURE_COLUMNS,
     build_sequences,
     compute_technical_features,
@@ -108,10 +110,14 @@ class PredictionResult:
     ret_lag_1: float
     model_version: str
     features_verified: bool
+    atr_14: float = 0.0
+    atr_pct: float = 0.0
+    interval: str = "1d"
+    model_detail: str = "lstm_v1"
 
 
 class QuantPredictor:
-    """Cargador e inferencia de producción para el modelo T4 congelado."""
+    """Cargador e inferencia de producción para LSTM T4 y Quant v2 XGBoost (1h/1d)."""
 
     def __init__(self, artifacts_dir: Path | None = None, verify_hashes: bool = True) -> None:
         self.artifacts_dir = artifacts_dir or ARTIFACTS_DIR
@@ -172,10 +178,69 @@ class QuantPredictor:
         self.model.load_state_dict(state_dict)
         self.model.eval()
 
-    def predict_from_candles(self, candles_df: pd.DataFrame, symbol: str) -> PredictionResult:
+        # Cargar modelos Quant v2 (Walk-Forward XGBoost 1d & 1h) con verificación SHA-256
+        self.xgb_1d: Optional[Any] = None
+        self.xgb_1h: Optional[Any] = None
+        self.quant_v2_manifest: Dict[str, Any] = {}
+        self._load_quant_v2(verify_hashes=verify_hashes)
+
+    def _load_quant_v2(self, verify_hashes: bool = True) -> None:
+        v2_man_path = self.artifacts_dir / "quant_v2_manifest.json"
+        if not v2_man_path.exists():
+            return
+        try:
+            man = json.loads(v2_man_path.read_text(encoding="utf-8"))
+            self.quant_v2_manifest = man
+            models_meta = man.get("models", {})
+            for tf, attr_name in (("1d", "xgb_1d"), ("1h", "xgb_1h")):
+                m_info = models_meta.get(tf)
+                if not m_info:
+                    continue
+                m_path = self.artifacts_dir / str(m_info.get("model_file", f"quant_xgb_{tf}.joblib"))
+                if not m_path.exists():
+                    continue
+                if verify_hashes and "sha256" in m_info:
+                    if compute_sha256(m_path) != m_info["sha256"]:
+                        raise RuntimeError(f"Hash SHA-256 inválido para {m_path.name}")
+                setattr(self, attr_name, joblib.load(m_path))
+        except RuntimeError:
+            raise
+        except Exception:
+            self.xgb_1d = None
+            self.xgb_1h = None
+
+    def _predict_batch_returns(
+        self, feat_df: pd.DataFrame, interval: str = "1d"
+    ) -> tuple[np.ndarray, str]:
+        x_raw = feat_df[self.feature_columns].to_numpy(dtype=np.float32)
+        x_scaled = self.scaler.transform(x_raw)
+        seqs, _ = build_sequences(x_scaled, targets=None, seq_len=self.seq_len)
+        with torch.no_grad():
+            lstm_preds = self.model(torch.tensor(seqs, dtype=torch.float32)).numpy()
+
+        aligned = feat_df.iloc[self.seq_len - 1 :].reset_index(drop=True)
+        atr_pcts = np.maximum(aligned["atr_pct"].to_numpy(dtype=np.float32), 1e-4)
+
+        if interval == "1h" and self.xgb_1h is not None:
+            x_enh = aligned[ENHANCED_FEATURE_COLUMNS].to_numpy(dtype=np.float32)
+            xgb_z = self.xgb_1h.predict(x_enh)
+            return (xgb_z * atr_pcts).astype(float), "quant_xgb_1h"
+
+        if interval == "1d" and self.xgb_1d is not None:
+            x_enh = aligned[ENHANCED_FEATURE_COLUMNS].to_numpy(dtype=np.float32)
+            xgb_z = self.xgb_1d.predict(x_enh)
+            xgb_rets = xgb_z * atr_pcts
+            blended = (0.65 * xgb_rets + 0.35 * lstm_preds).astype(float)
+            return blended, "ensemble_xgb1d_lstm"
+
+        return lstm_preds.astype(float), self.model_version
+
+    def predict_from_candles(
+        self, candles_df: pd.DataFrame, symbol: str, interval: str = "1d"
+    ) -> PredictionResult:
         """
         Recibe un DataFrame histórico de velas cerradas ordenado ascendentemente,
-        calcula features sin leakage y predice r_hat_{t+1} para la última vela cerrada.
+        calcula features sin leakage y predice r_hat_{t+1} ajustado a `interval`.
         """
         if len(candles_df) < 35:
             raise ValueError(
@@ -188,13 +253,8 @@ class QuantPredictor:
                 f"Filas válidas tras warmup ({len(feat_df)}) < seq_len ({self.seq_len})."
             )
 
-        x_raw = feat_df[self.feature_columns].to_numpy(dtype=np.float32)
-        x_scaled = self.scaler.transform(x_raw)
-        seqs, _ = build_sequences(x_scaled, targets=None, seq_len=self.seq_len)
-        last_seq = torch.tensor(seqs[-1:], dtype=torch.float32)
-
-        with torch.no_grad():
-            pred_val = float(self.model(last_seq).item())
+        preds, model_detail = self._predict_batch_returns(feat_df, interval=interval)
+        pred_val = float(preds[-1])
 
         last_row = feat_df.iloc[-1]
         close_time = str(last_row.get("close_time", last_row.get("timestamp", "")))
@@ -212,4 +272,54 @@ class QuantPredictor:
             ret_lag_1=float(last_row["ret_lag_1"]),
             model_version=self.model_version,
             features_verified=True,
+            atr_14=float(last_row.get("atr_14", 0.0)),
+            atr_pct=float(last_row.get("atr_pct", 0.015)),
+            interval=interval,
+            model_detail=model_detail,
         )
+
+    def predict_historical_series(
+        self,
+        candles_df: pd.DataFrame,
+        symbol: str,
+        interval: str = "1d",
+        last_n: int = 35,
+    ) -> List[Dict[str, Any]]:
+        """
+        Calcula los pronósticos pasados t -> t+1 sobre las últimas `last_n` velas
+        para graficar precisión visual histórica en el dashboard sin leakage.
+        """
+        if len(candles_df) < 35:
+            return []
+        feat_df = compute_technical_features(candles_df, drop_na=True)
+        if len(feat_df) <= self.seq_len:
+            return []
+
+        preds, _ = self._predict_batch_returns(feat_df, interval=interval)
+        aligned = feat_df.iloc[self.seq_len - 1 :].reset_index(drop=True)
+        n_pairs = len(aligned) - 1
+        if n_pairs <= 0:
+            return []
+
+        start_idx = max(0, n_pairs - int(last_n))
+        series: List[Dict[str, Any]] = []
+        for idx in range(start_idx, n_pairs):
+            row_t = aligned.iloc[idx]
+            row_next = aligned.iloc[idx + 1]
+            c_t = float(row_t["close"])
+            c_next = float(row_next["close"])
+            r_hat = float(preds[idx])
+            r_actual = ((c_next - c_t) / c_t) if c_t > 0 else 0.0
+            hit = ((r_hat > 0 and r_actual > 0) or (r_hat < 0 and r_actual < 0))
+            series.append(
+                {
+                    "open_time": str(row_next.get("open_time", "")),
+                    "close_time": str(row_next.get("close_time", row_next.get("timestamp", ""))),
+                    "predicted_close": round(c_t * (1.0 + r_hat), 4),
+                    "actual_next_close": round(c_next, 4),
+                    "pred_return_t1": round(r_hat, 6),
+                    "actual_return_t1": round(r_actual, 6),
+                    "hit": bool(hit),
+                }
+            )
+        return series

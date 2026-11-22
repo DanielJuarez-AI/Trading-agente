@@ -2,14 +2,15 @@
 Middle Office - Motor Determinista de Riesgo (Hard Gate en Python Puro).
 
 REGLA CRÍTICA DE GOBERNANZA:
-Ningún modelo LLM (ni Qwen 14B por API externa ni Dual Laya local) puede modificar,
+Ningún modelo LLM (ni Qwen por API/Local ni Dual Laya local) puede modificar,
 suavizar o evadir los límites cargados desde `config/risk_limits.yaml`.
+Incluye protección determinista Stop-Loss ATR, Trailing Stop y Take-Profit.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from backend.app.back_office.database import TradingDatabase
 from backend.app.back_office.paper_engine import PortfolioState, floor_to_step
@@ -50,10 +51,15 @@ class DeterministicRiskEngine:
         system_status: str,
         laya2_approved: bool = True,
         laya2_reason: str = "",
+        atr_14: Optional[float] = None,
+        candle_low: Optional[float] = None,
+        candle_high: Optional[float] = None,
     ) -> RiskVerdict:
         """
         Valida todas las restricciones duras de riesgo antes de liquidar en Paper.
         Si rechaza un BUY/SELL, fuerza final_action='HOLD' (0 órdenes ejecutadas).
+        Si una posición abierta activa Stop-Loss, Trailing Stop o Take-Profit,
+        fuerza salida protectora SELL determinista incluso si el LLM propuso HOLD.
         """
         # 1. Kill-Switch Humano / Estado del Sistema
         if system_status == "STOPPED":
@@ -81,17 +87,7 @@ class DeterministicRiskEngine:
                 rule_triggered="SYSTEM_PAUSED",
             )
 
-        # 2. Auditoría semántica de Laya #2
-        if not laya2_approved:
-            return RiskVerdict(
-                approved=False,
-                status="REJECTED",
-                final_action="HOLD",
-                reason=f"Veto previo de Laya #2 Local: {laya2_reason}",
-                rule_triggered="LAYA2_SEMANTIC_VETO",
-            )
-
-        # 3. Símbolo en lista blanca oficial (30 PRIMARY_TICKERS + BTCUSDT)
+        # Símbolo en lista blanca oficial (30 PRIMARY_TICKERS + BTCUSDT)
         if symbol not in self._settings.allowed_symbols:
             self._db.log_error(
                 error_code="RISK_SYMBOL_NOT_WHITELISTED",
@@ -105,6 +101,67 @@ class DeterministicRiskEngine:
                 final_action="HOLD",
                 reason=f"Símbolo {symbol} fuera de la lista blanca oficial.",
                 rule_triggered="WHITELIST_SYMBOL",
+            )
+
+        # 1b. Salidas Protectoras Deterministas (Stop-Loss / Trailing Stop / Take-Profit)
+        has_open_pos = portfolio.position_qty >= self._settings.min_lot_size
+        if has_open_pos and market_price > 0 and system_status == "RUNNING":
+            sl = portfolio.stop_loss_price
+            if sl is not None and (
+                market_price <= sl or (candle_low is not None and candle_low <= sl)
+            ):
+                return RiskVerdict(
+                    approved=True,
+                    status="APPROVED",
+                    final_action="SELL",
+                    reason=(
+                        f"Stop-Loss determinista activado en {symbol}: "
+                        f"precio {market_price:.2f} (min={candle_low or market_price:.2f}) <= SL {sl:.2f}."
+                    ),
+                    rule_triggered="STOP_LOSS_TRIGGERED",
+                )
+
+            if (
+                portfolio.avg_entry_price > 0
+                and portfolio.highest_price > portfolio.avg_entry_price * 1.01
+            ):
+                trail_px = portfolio.highest_price * (1.0 - self._settings.trailing_stop_pct)
+                if market_price <= trail_px:
+                    return RiskVerdict(
+                        approved=True,
+                        status="APPROVED",
+                        final_action="SELL",
+                        reason=(
+                            f"Trailing Stop determinista activado en {symbol}: "
+                            f"precio {market_price:.2f} <= {trail_px:.2f} "
+                            f"(máximo={portfolio.highest_price:.2f})."
+                        ),
+                        rule_triggered="TRAILING_STOP_TRIGGERED",
+                    )
+
+            tp = portfolio.take_profit_price
+            if tp is not None and (
+                market_price >= tp or (candle_high is not None and candle_high >= tp)
+            ):
+                return RiskVerdict(
+                    approved=True,
+                    status="APPROVED",
+                    final_action="SELL",
+                    reason=(
+                        f"Take-Profit determinista activado en {symbol}: "
+                        f"precio {market_price:.2f} (máx={candle_high or market_price:.2f}) >= TP {tp:.2f}."
+                    ),
+                    rule_triggered="TAKE_PROFIT_TRIGGERED",
+                )
+
+        # 2. Auditoría semántica de Laya #2
+        if not laya2_approved:
+            return RiskVerdict(
+                approved=False,
+                status="REJECTED",
+                final_action="HOLD",
+                reason=f"Veto previo de Laya #2 Local: {laya2_reason}",
+                rule_triggered="LAYA2_SEMANTIC_VETO",
             )
 
         # 4. Acción válida
@@ -183,22 +240,35 @@ class DeterministicRiskEngine:
                 rule_triggered="MAX_DAILY_LOSS",
             )
 
-        # 7b. Exposición máxima (sin apalancamiento)
-        current_exposure = (
+        # 7b. Exposición máxima total del portafolio y por activo individual
+        single_exposure = (
             (portfolio.position_qty * market_price) / portfolio.total_equity
             if portfolio.total_equity > 0
             else 0.0
         )
-        if current_exposure >= self._settings.max_exposure_pct - 1e-6:
+        total_exposure = max(float(portfolio.total_exposure_pct), single_exposure)
+        if total_exposure >= self._settings.max_exposure_pct - 1e-6:
             return RiskVerdict(
                 approved=False,
                 status="REJECTED",
                 final_action="HOLD",
                 reason=(
-                    f"Exposición actual ({current_exposure:.2%}) alcanzó el máximo "
+                    f"Exposición total del portafolio ({total_exposure:.2%}) alcanzó el máximo "
                     f"permitido ({self._settings.max_exposure_pct:.2%})."
                 ),
                 rule_triggered="MAX_EXPOSURE",
+            )
+
+        if single_exposure >= self._settings.max_single_position_pct - 1e-6:
+            return RiskVerdict(
+                approved=False,
+                status="REJECTED",
+                final_action="HOLD",
+                reason=(
+                    f"Exposición en {symbol} ({single_exposure:.2%}) alcanzó el límite por activo "
+                    f"({self._settings.max_single_position_pct:.2%})."
+                ),
+                rule_triggered="MAX_SINGLE_POSITION_EXPOSURE",
             )
 
         # 7c. Saldo suficiente para lote mínimo considerando slippage y comisión

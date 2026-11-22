@@ -154,6 +154,37 @@ class TradingDatabase:
                     payload_excerpt TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS positions (
+                    symbol TEXT PRIMARY KEY,
+                    quantity REAL NOT NULL,
+                    avg_entry_price REAL NOT NULL,
+                    entry_cost_total REAL NOT NULL,
+                    last_price REAL NOT NULL,
+                    highest_price REAL NOT NULL,
+                    stop_loss_price REAL,
+                    take_profit_price REAL,
+                    trailing_stop_pct REAL NOT NULL DEFAULT 0.035,
+                    opened_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS episodic_memories (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    symbol TEXT NOT NULL,
+                    interval TEXT NOT NULL,
+                    candle_time TEXT NOT NULL,
+                    entry_price REAL NOT NULL,
+                    exit_price REAL NOT NULL,
+                    realized_pnl REAL NOT NULL,
+                    return_pct REAL NOT NULL,
+                    regime TEXT NOT NULL,
+                    rsi_at_entry REAL NOT NULL,
+                    vol_at_entry REAL NOT NULL,
+                    outcome TEXT NOT NULL,
+                    lesson TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
                 """
                 )
             finally:
@@ -392,7 +423,178 @@ class TradingDatabase:
                     now,
                 ),
             )
+
+            pos_qty = float(snapshot_data.get("position_qty", 0.0))
+            sym = str(snapshot_data["symbol"])
+            if pos_qty >= 1e-8:
+                last_px = float(
+                    snapshot_data.get("last_price")
+                    or (float(snapshot_data["position_value"]) / pos_qty)
+                )
+                self.upsert_position(
+                    {
+                        "symbol": sym,
+                        "quantity": pos_qty,
+                        "avg_entry_price": float(snapshot_data.get("avg_entry_price", last_px)),
+                        "entry_cost_total": float(snapshot_data.get("entry_cost_total", pos_qty * last_px)),
+                        "last_price": last_px,
+                        "highest_price": float(snapshot_data.get("highest_price", last_px) or last_px),
+                        "stop_loss_price": snapshot_data.get("stop_loss_price"),
+                        "take_profit_price": snapshot_data.get("take_profit_price"),
+                        "trailing_stop_pct": float(snapshot_data.get("trailing_stop_pct", 0.035)),
+                        "opened_at": snapshot_data.get("candle_time", now),
+                        "updated_at": now,
+                    },
+                    conn=conn,
+                )
+            else:
+                self.delete_position(sym, conn=conn)
+
             return decision_id
+
+    # --------------------------------------------------------------------------
+    # POSICIONES MULTI-TICKER Y MEMORIA EPISÓDICA (FINMEM)
+    # --------------------------------------------------------------------------
+    def upsert_position(
+        self, pos_data: Dict[str, Any], conn: Optional[sqlite3.Connection] = None
+    ) -> None:
+        now = utc_now_iso()
+        params = (
+            str(pos_data["symbol"]),
+            float(pos_data["quantity"]),
+            float(pos_data["avg_entry_price"]),
+            float(pos_data["entry_cost_total"]),
+            float(pos_data["last_price"]),
+            float(pos_data.get("highest_price", pos_data["last_price"])),
+            pos_data.get("stop_loss_price"),
+            pos_data.get("take_profit_price"),
+            float(pos_data.get("trailing_stop_pct", 0.035)),
+            str(pos_data.get("opened_at", now)),
+            str(pos_data.get("updated_at", now)),
+        )
+        sql = """
+            INSERT INTO positions (
+                symbol, quantity, avg_entry_price, entry_cost_total,
+                last_price, highest_price, stop_loss_price, take_profit_price,
+                trailing_stop_pct, opened_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(symbol) DO UPDATE SET
+                quantity = excluded.quantity,
+                avg_entry_price = excluded.avg_entry_price,
+                entry_cost_total = excluded.entry_cost_total,
+                last_price = excluded.last_price,
+                highest_price = excluded.highest_price,
+                stop_loss_price = excluded.stop_loss_price,
+                take_profit_price = excluded.take_profit_price,
+                trailing_stop_pct = excluded.trailing_stop_pct,
+                updated_at = excluded.updated_at;
+        """
+        if conn is not None:
+            conn.execute(sql, params)
+            return
+        with self.atomic_tx() as tx:
+            tx.execute(sql, params)
+
+    def delete_position(
+        self, symbol: str, conn: Optional[sqlite3.Connection] = None
+    ) -> None:
+        if conn is not None:
+            conn.execute("DELETE FROM positions WHERE symbol = ?;", (symbol,))
+            return
+        with self.atomic_tx() as tx:
+            tx.execute("DELETE FROM positions WHERE symbol = ?;", (symbol,))
+
+    def get_position(self, symbol: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            conn = self._connect()
+            try:
+                row = conn.execute(
+                    "SELECT * FROM positions WHERE symbol = ?;", (symbol,)
+                ).fetchone()
+                return dict(row) if row else None
+            finally:
+                conn.close()
+
+    def list_positions(self) -> List[Dict[str, Any]]:
+        with self._lock:
+            conn = self._connect()
+            try:
+                rows = conn.execute(
+                    "SELECT * FROM positions WHERE quantity >= 1e-8 ORDER BY updated_at DESC;"
+                ).fetchall()
+                return [dict(r) for r in rows]
+            finally:
+                conn.close()
+
+    def add_episodic_memory(self, mem_data: Dict[str, Any]) -> int:
+        now = utc_now_iso()
+        with self.atomic_tx() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO episodic_memories (
+                    symbol, interval, candle_time, entry_price, exit_price,
+                    realized_pnl, return_pct, regime, rsi_at_entry, vol_at_entry,
+                    outcome, lesson, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                """,
+                (
+                    str(mem_data["symbol"]),
+                    str(mem_data.get("interval", "1d")),
+                    str(mem_data["candle_time"]),
+                    float(mem_data["entry_price"]),
+                    float(mem_data["exit_price"]),
+                    float(mem_data["realized_pnl"]),
+                    float(mem_data["return_pct"]),
+                    str(mem_data.get("regime", "unknown")),
+                    float(mem_data.get("rsi_at_entry", 50.0)),
+                    float(mem_data.get("vol_at_entry", 0.02)),
+                    str(mem_data["outcome"]),
+                    str(mem_data["lesson"])[:400],
+                    now,
+                ),
+            )
+            return int(cur.lastrowid)
+
+    def list_episodic_memories(
+        self, symbol: Optional[str] = None, limit: int = 5
+    ) -> List[Dict[str, Any]]:
+        with self._lock:
+            conn = self._connect()
+            try:
+                if symbol:
+                    rows = conn.execute(
+                        "SELECT * FROM episodic_memories WHERE symbol = ? ORDER BY id DESC LIMIT ?;",
+                        (symbol, limit),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        "SELECT * FROM episodic_memories ORDER BY id DESC LIMIT ?;",
+                        (limit,),
+                    ).fetchall()
+                return [dict(r) for r in rows]
+            finally:
+                conn.close()
+
+    def get_decision_by_id(self, decision_id: int) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            conn = self._connect()
+            try:
+                row = conn.execute(
+                    "SELECT * FROM decisions WHERE id = ?;", (int(decision_id),)
+                ).fetchone()
+                if not row:
+                    return None
+                d = dict(row)
+                for json_col in ("laya1_json", "qwen_json", "laya2_json"):
+                    try:
+                        d[json_col] = json.loads(d[json_col])
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                return d
+            finally:
+                conn.close()
 
     # --------------------------------------------------------------------------
     # CONSULTAS DE LECTURA Y RECUPERACIÓN

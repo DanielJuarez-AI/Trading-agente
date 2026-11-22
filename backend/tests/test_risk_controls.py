@@ -324,7 +324,7 @@ def test_qwen_mode_switch_local_6gb_and_external_api(
     app = create_app(settings_override=cfg)
 
     with TestClient(app) as client:
-        # Cambiar a Qwen Local 6GB VRAM (qwen2.5:7b-instruct-q4_K_M)
+        # Cambiar a Qwen Local 6GB VRAM (qwen2.5-3b-quant:latest)
         sw_local = client.post(
             "/api/control/switch_qwen_mode",
             headers={"X-API-Key": cfg.gateway_api_key},
@@ -335,7 +335,7 @@ def test_qwen_mode_switch_local_6gb_and_external_api(
         assert body_local["qwen_mode"] == "LOCAL_DEVICE"
         assert body_local["topology"]["is_local_device"] is True
         assert body_local["topology"]["vram_budget_gb"] == 6.0
-        assert body_local["topology"]["model"] == "qwen2.5:7b-instruct-q4_K_M"
+        assert body_local["topology"]["model"] == "qwen2.5-3b-quant:latest"
 
         st = client.get("/api/status").json()
         assert st["qwen_mode"] == "LOCAL_DEVICE"
@@ -435,3 +435,81 @@ def test_qwen_orchestrator_feedback_to_laya1_and_laya2_and_latencies(
         c1d_data = c1d.json()
         assert c1d_data["interval"] == "1h"
         assert len(c1d_data["candles"]) == 24
+
+
+def test_200_candles_rsi14_and_hourly_daily_trading(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from fastapi.testclient import TestClient
+    from backend.app.main import create_app
+
+    cfg = _make_settings(tmp_path, monkeypatch)
+    cfg.qwen_api_key = ""
+    app = create_app(settings_override=cfg)
+
+    with TestClient(app) as client:
+        # 1) Ventana por defecto = 200 velas en 1d (200 días) con RSI-14
+        r_1d = client.get("/api/candles?symbol=AAPL&interval=1d")
+        assert r_1d.status_code == 200
+        d1 = r_1d.json()
+        assert d1["interval"] == "1d"
+        assert d1["horizon_label"] == "+1D"
+        assert len(d1["candles"]) == 200
+        assert "last_rsi_14" in d1
+        assert 0.0 <= d1["last_rsi_14"] <= 100.0
+        for field in ("rsi_14", "ema10", "ema20"):
+            assert field in d1["candles"][-1]
+        assert d1["agent_forecast"] is not None
+        assert d1["agent_forecast"]["horizon_label"] == "+1D"
+        assert "projected_rsi_t1" in d1["agent_forecast"]
+        assert 0.0 <= d1["agent_forecast"]["projected_rsi_t1"] <= 100.0
+
+        # 2) Ventana por defecto = 200 velas en 1h (200 horas) con RSI-14 y timestamps Unix int
+        r_1h = client.get("/api/candles?symbol=BTC-USD&interval=1h")
+        assert r_1h.status_code == 200
+        h1 = r_1h.json()
+        assert h1["interval"] == "1h"
+        assert h1["horizon_label"] == "+1H"
+        assert len(h1["candles"]) == 200
+        assert isinstance(h1["candles"][-1]["time"], int)
+        assert "last_rsi_14" in h1
+        assert 0.0 <= h1["last_rsi_14"] <= 100.0
+        assert "rsi_14" in h1["candles"][-1]
+        assert h1["agent_forecast"] is not None
+        assert h1["agent_forecast"]["horizon_label"] == "+1H"
+        assert "projected_rsi_t1" in h1["agent_forecast"]
+
+        # 3) Trading por horas (1h) vía replay y registro persistente con interval='1h'
+        rep_1h = client.post(
+            "/api/control/replay",
+            headers={"X-API-Key": cfg.gateway_api_key},
+            json={"symbol": "AAPL", "interval": "1h", "n_cycles": 3},
+        )
+        assert rep_1h.status_code == 200
+        rep_body = rep_1h.json()
+        assert rep_body["interval"] == "1h"
+        assert rep_body["cycles_executed"] == 3
+
+        decs = client.get("/api/decisions?limit=10").json()["items"]
+        hourly_decs = [d for d in decs if d["symbol"] == "AAPL" and d["interval"] == "1h"]
+        assert len(hourly_decs) == 3
+
+        # 4) Endpoint de telemetría
+        tel = client.get("/api/telemetry")
+        assert tel.status_code == 200
+        tb = tel.json()
+        for key in ("gpu", "ollama", "qwen_live_status", "laya2_live_status"):
+            assert key in tb
+
+        # 5) Versión basada en commits en /health y /api/status
+        hl = client.get("/health")
+        assert hl.status_code == 200
+        hb = hl.json()
+        assert str(hb["app_version"]).startswith("v0.1.")
+        assert int(hb["commit_count"]) >= 1
+
+        st_ver = client.get("/api/status")
+        assert st_ver.status_code == 200
+        sb = st_ver.json()
+        assert str(sb["app_version"]).startswith("v0.1.")
+        assert int(sb["commit_count"]) >= 1

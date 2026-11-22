@@ -13,6 +13,7 @@ latencia promedio y acciones rechazadas, y exporta `exports/simulacion.csv`.
 from __future__ import annotations
 
 import json
+import math
 import tempfile
 import time
 from pathlib import Path
@@ -42,6 +43,7 @@ def _compute_lane_summary(
     total_orders: int,
     latencies_ms: List[float],
     rejected_actions: int,
+    exposure_pct: float = 0.0,
 ) -> Dict[str, Any]:
     eq_arr = np.asarray(equities, dtype=float)
     peaks = np.maximum.accumulate(eq_arr)
@@ -52,9 +54,30 @@ def _compute_lane_summary(
 
     if len(closed_pnls) == 0:
         win_rate: float | str = "No definido"
+        profit_factor = 0.0
+        expectancy = 0.0
     else:
         win_rate = float(sum(1 for p in closed_pnls if p > 0) / len(closed_pnls))
+        gross_win = sum(p for p in closed_pnls if p > 0.0)
+        gross_loss = abs(sum(p for p in closed_pnls if p < 0.0))
+        profit_factor = round(gross_win / gross_loss, 3) if gross_loss > 0 else (99.0 if gross_win > 0 else 0.0)
+        expectancy = round(float(np.mean(closed_pnls)), 2)
 
+    sharpe = 0.0
+    sortino = 0.0
+    if len(eq_arr) >= 3:
+        rets = np.diff(eq_arr) / np.where(eq_arr[:-1] > 0, eq_arr[:-1], 1.0)
+        mean_r = float(np.mean(rets))
+        std_r = float(np.std(rets))
+        if std_r > 1e-8:
+            sharpe = round((mean_r / std_r) * math.sqrt(252.0), 3)
+        downside = rets[rets < 0]
+        if len(downside) > 0:
+            down_std = float(np.sqrt(np.mean(downside ** 2)))
+            if down_std > 1e-8:
+                sortino = round((mean_r / down_std) * math.sqrt(252.0), 3)
+
+    calmar = round(net_ret / max_dd, 3) if max_dd > 1e-6 else 0.0
     avg_lat = float(np.mean(latencies_ms)) if latencies_ms else 0.0
     return {
         "strategy": lane_name,
@@ -67,6 +90,12 @@ def _compute_lane_summary(
         "total_orders": total_orders,
         "avg_latency_ms": round(avg_lat, 2),
         "rejected_actions": rejected_actions,
+        "sharpe_ratio": sharpe,
+        "sortino_ratio": sortino,
+        "calmar_ratio": calmar,
+        "profit_factor": profit_factor,
+        "expectancy": expectancy,
+        "exposure_pct": round(exposure_pct, 2),
     }
 
 
@@ -76,13 +105,15 @@ def run_three_lane_benchmark(
     settings: Settings | None = None,
     predictor: QuantPredictor | None = None,
     export_csv: bool = True,
+    interval: str = "1d",
 ) -> Dict[str, Any]:
     """
     Ejecuta la comparativa científica de 3 carriles sobre `n_cycles` (>= 20) velas
-    históricas cerradas de `symbol` y exporta `exports/simulacion.csv`.
+    históricas cerradas de `symbol` en temporalidad `interval` (`1h` o `1d`) y exporta `exports/simulacion.csv`.
     """
     cfg = settings or get_settings()
     pred_engine = predictor or QuantPredictor()
+    tf = interval if interval in {"1h", "1d"} else "1d"
     initial_capital = float(cfg.profile_config.initial_capital)
     fee_pct = float(cfg.profile_config.fee_pct)
     slip_mult = float(cfg.slippage_bps) / 10000.0
@@ -96,10 +127,11 @@ def run_three_lane_benchmark(
             default_mode="replay",
             profile_name=cfg.simulation_profile,
             initial_capital=initial_capital,
+            default_interval=tf,
         )
         gateway = PrivateAuthGateway(cfg, bench_db)
         market_client = MEXCMarketClient(cfg, bench_db)
-        full_df = market_client.load_replay_candles(symbol=symbol, interval="1d")
+        full_df = market_client.load_replay_candles(symbol=symbol, interval=tf)
 
         min_warmup = 45
         if len(full_df) < min_warmup + n_cycles:
@@ -123,7 +155,7 @@ def run_three_lane_benchmark(
             t0 = time.perf_counter()
             win_df = full_df.iloc[: idx + 1].reset_index(drop=True)
             px = float(win_df.iloc[-1]["close"])
-            pr = pred_engine.predict_from_candles(win_df, symbol=symbol)
+            pr = pred_engine.predict_from_candles(win_df, symbol=symbol, interval=tf)
 
             action = "HOLD"
             if pr.pred_return_t1 > 0.0005 and pr.ema_ratio >= 0.998:
@@ -186,7 +218,7 @@ def run_three_lane_benchmark(
             paper_engine=paper_engine,
         )
         cycle_results = scheduler.run_replay_cycles(
-            symbol=symbol, n_cycles=n_cycles, gateway_key=cfg.gateway_api_key
+            symbol=symbol, n_cycles=n_cycles, gateway_key=cfg.gateway_api_key, interval=tf
         )
 
         l2_equities = [float(r["snapshot"]["total_equity"]) for r in cycle_results]
@@ -217,6 +249,13 @@ def run_three_lane_benchmark(
                 bh_orders = 1
             bh_equities.append(bh_cash + bh_qty * px)
 
+        l2_last_exp = (
+            float(cycle_results[-1]["snapshot"]["position_value"]) / max(float(cycle_results[-1]["snapshot"]["total_equity"]), 1.0) * 100.0
+            if cycle_results
+            else 0.0
+        )
+        l1_last_exp = (l1_qty * float(full_df.iloc[-1]["close"]) / max(l1_equities[-1], 1.0) * 100.0) if l1_equities else 0.0
+
         lane1_summary = _compute_lane_summary(
             "1_Modelo_Sin_LLM",
             initial_capital,
@@ -225,6 +264,7 @@ def run_three_lane_benchmark(
             l1_orders,
             l1_latencies,
             l1_rejected,
+            exposure_pct=l1_last_exp,
         )
         lane2_summary = _compute_lane_summary(
             "2_Agente_DualLaya_Qwen",
@@ -234,6 +274,7 @@ def run_three_lane_benchmark(
             len(l2_orders_list),
             l2_latencies,
             l2_rejected,
+            exposure_pct=l2_last_exp,
         )
         lane3_summary = _compute_lane_summary(
             "3_Buy_And_Hold",
@@ -243,7 +284,32 @@ def run_three_lane_benchmark(
             bh_orders,
             [0.05] * len(bh_equities),
             0,
+            exposure_pct=100.0,
         )
+
+        # Curvas de equidad y drawdown para visualización comparativa en UI
+        equity_curve_points: List[Dict[str, Any]] = []
+        l2_peak = initial_capital
+        bh_peak = initial_capital
+        for i, c_res in enumerate(cycle_results):
+            l2_eq = float(l2_equities[i])
+            bh_eq = float(bh_equities[i])
+            l2_peak = max(l2_peak, l2_eq)
+            bh_peak = max(bh_peak, bh_eq)
+            l2_dd = ((l2_peak - l2_eq) / l2_peak * 100.0) if l2_peak > 0 else 0.0
+            bh_dd = ((bh_peak - bh_eq) / bh_peak * 100.0) if bh_peak > 0 else 0.0
+            equity_curve_points.append(
+                {
+                    "step": i + 1,
+                    "time": str(c_res["candle_close_utc"])[:10],
+                    "candle_close_utc": c_res["candle_close_utc"],
+                    "lane1_equity": round(float(l1_equities[i]), 2),
+                    "lane2_equity": round(l2_eq, 2),
+                    "lane3_equity": round(bh_eq, 2),
+                    "lane2_drawdown_pct": round(l2_dd, 4),
+                    "lane3_drawdown_pct": round(bh_dd, 4),
+                }
+            )
 
         # Exportar trace completo en exports/simulacion.csv
         if export_csv:
@@ -290,10 +356,12 @@ def run_three_lane_benchmark(
 
         summary_payload = {
             "symbol": symbol,
+            "interval": tf,
             "cycles_evaluated": len(cycle_results),
             "profile": cfg.simulation_profile,
             "topology": cfg.hybrid_topology_metadata(),
             "lanes": [lane1_summary, lane2_summary, lane3_summary],
+            "equity_curve": equity_curve_points,
             "interpretation": interpretation,
         }
         if export_csv:

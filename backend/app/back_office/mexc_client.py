@@ -120,7 +120,7 @@ class MEXCMarketClient:
         return symbol.upper() in {"BTC-USD", "BTCUSDT"}
 
     def _fetch_mexc_klines_with_backoff(
-        self, symbol: str, interval: str, limit: int = 120
+        self, symbol: str, interval: str, limit: int = 250
     ) -> List[List[Any]]:
         """
         Consulta pública GET /api/v3/klines con máximo 3 intentos y espera exponencial.
@@ -173,7 +173,7 @@ class MEXCMarketClient:
         self,
         symbol: str,
         interval: Optional[str] = None,
-        limit: int = 120,
+        limit: int = 250,
         now_utc: Optional[datetime] = None,
         enforce_mexc_for_crypto: bool = True,
     ) -> pd.DataFrame:
@@ -218,7 +218,7 @@ class MEXCMarketClient:
             if tf not in {"1h", "1d"}:
                 raise ValueError(f"Temporalidad no soportada: {tf}. Use '1h' o '1d'.")
             try:
-                yf_period = "30d" if tf == "1h" else "1y"
+                yf_period = "60d" if tf == "1h" else "2y"
                 hist = yf.download(
                     tickers=symbol,
                     period=yf_period,
@@ -336,7 +336,7 @@ class MEXCMarketClient:
         if interval == "1h":
             # Respaldo determinista intradía si no existe replay_candles_1h.json
             rows = []
-            for item in cache[canonical][-30:]:
+            for item in cache[canonical][-35:]:
                 day_dt = _parse_iso_utc(item["open_time"])
                 o = float(item["open"])
                 c = float(item["close"])

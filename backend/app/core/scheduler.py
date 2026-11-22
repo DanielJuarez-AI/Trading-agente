@@ -1,14 +1,16 @@
 """
-Core Scheduler - Orquestador del Ciclo Completo de 7 Etapas.
+Core Scheduler - Orquestador del Ciclo Completo Multi-Agente + Eventos SSE + Daemon Autónomo.
 
-Flujo estricto:
+Flujo:
 1. Back Office: Ingesta de vela cerrada e idempotencia SQLite
-2. Front Office: Features sin leakage + Modelo LSTM T4 congelado (r_hat_{t+1})
-3. Front Office [DISPOSITIVO LOCAL]: Laya #1 (/v1/systemone)
-4. Orquestador [API EXTERNA - NO LOCAL]: Qwen 14B (/chat/completions) + Pydantic
-5. Middle Office [DISPOSITIVO LOCAL]: Laya #2 (/v1/systemone) Anti-Injection & Coherencia
-6. Middle Office [PYTHON DETERMINISTA]: Risk Engine (Hard Gate inmutable)
-7. Back Office: Simulación Paper + Registro Atómico SQLite WAL
+2. Front Office: Features causales + Quant v2 (XGBoost Walk-Forward 1h/1d + LSTM T4)
+2b. Front Office: Contexto de Noticias/Sentimiento + Memoria Episódica (FinMem)
+3. Front Office [LOCAL]: Laya #1 (Dueling Double-DQN + A2C)
+4. Orquestador [API EXTERNA o LOCAL 3B]: Qwen + Debate Bull/Bear + Feedback Real
+4b. Retroalimentación Qwen -> Laya #1 y Laya #2
+5. Middle Office [LOCAL]: Laya #2 Guardia Semántica (coherencia vs umbral + anti-inyección)
+6. Middle Office [PYTHON DETERMINISTA]: Risk Engine + Stop-Loss / Trailing Stop / Take-Profit
+7. Back Office: Simulación Paper Multi-Ticker + Memoria Post-Trade + Registro Atómico SQLite WAL
 """
 
 from __future__ import annotations
@@ -20,7 +22,7 @@ from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
-from backend.app.back_office.database import DuplicateCandleError, TradingDatabase
+from backend.app.back_office.database import DuplicateCandleError, TradingDatabase, utc_now_iso
 from backend.app.back_office.mexc_client import MEXCMarketClient
 from backend.app.back_office.paper_engine import (
     InsufficientFundsError,
@@ -28,11 +30,14 @@ from backend.app.back_office.paper_engine import (
     SystemStoppedError,
 )
 from backend.app.core.config import Settings
+from backend.app.core.events import PipelineEventBus
 from backend.app.core.security import PrivateAuthGateway
+from backend.app.core.telemetry import SystemTelemetryService
 from backend.app.front_office.laya_alpha import (
     LAYA1_EXECUTION_MODE,
     LayaAlphaAgent,
 )
+from backend.app.front_office.news_sentiment import NewsSentimentService
 from backend.app.front_office.predictor import QuantPredictor
 from backend.app.middle_office.laya_guard import LayaGuardAgent
 from backend.app.middle_office.risk_engine import DeterministicRiskEngine
@@ -43,7 +48,7 @@ from backend.app.orchestrator.qwen_agent import (
 
 
 class TradingScheduler:
-    """Ejecutor del ciclo multi-agente en modo Live o Historical Replay."""
+    """Ejecutor del ciclo multi-agente en modo Live, Historical Replay y Daemon Autónomo."""
 
     def __init__(
         self,
@@ -57,6 +62,9 @@ class TradingScheduler:
         laya_guard: LayaGuardAgent,
         risk_engine: DeterministicRiskEngine,
         paper_engine: PaperTradingEngine,
+        event_bus: Optional[PipelineEventBus] = None,
+        news_service: Optional[NewsSentimentService] = None,
+        telemetry: Optional[SystemTelemetryService] = None,
     ) -> None:
         self.settings = settings
         self.db = db
@@ -68,8 +76,99 @@ class TradingScheduler:
         self.laya_guard = laya_guard
         self.risk_engine = risk_engine
         self.paper_engine = paper_engine
+        self.event_bus = event_bus
+        self.news_service = news_service
+        self.telemetry = telemetry
+
         self._bg_task: Optional[asyncio.Task[None]] = None
         self._stop_event = asyncio.Event()
+        self._daemon_enabled: bool = False
+        self._daemon_poll_seconds: int = 20
+        self._daemon_last_tick_utc: Optional[str] = None
+        self._daemon_cycles_run: int = 0
+        self._daemon_last_error: Optional[str] = None
+
+    def _emit(self, event_type: str, payload: Dict[str, Any]) -> None:
+        if self.event_bus is not None:
+            self.event_bus.publish(event_type, payload)
+
+    def daemon_status(self) -> Dict[str, Any]:
+        running = self._daemon_enabled and (self._bg_task is not None and not self._bg_task.done())
+        return {
+            "enabled": bool(self._daemon_enabled),
+            "running": bool(running),
+            "poll_seconds": int(self._daemon_poll_seconds),
+            "cycles_run": int(self._daemon_cycles_run),
+            "last_tick_utc": self._daemon_last_tick_utc,
+            "last_error": self._daemon_last_error,
+        }
+
+    async def start_daemon(self, interval_seconds: int = 20) -> Dict[str, Any]:
+        poll = max(5, min(int(interval_seconds), 3600))
+        self._daemon_poll_seconds = poll
+        if self._bg_task is not None and not self._bg_task.done():
+            self._daemon_enabled = True
+            return self.daemon_status()
+        self._stop_event.clear()
+        self._daemon_enabled = True
+        self._daemon_last_error = None
+        self._bg_task = asyncio.create_task(self._daemon_loop())
+        self.db.set_state("daemon_enabled", "true")
+        self._emit("daemon_status", self.daemon_status())
+        return self.daemon_status()
+
+    async def stop_daemon(self) -> Dict[str, Any]:
+        self._daemon_enabled = False
+        self._stop_event.set()
+        if self._bg_task is not None:
+            try:
+                await asyncio.wait_for(self._bg_task, timeout=2.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                self._bg_task.cancel()
+            self._bg_task = None
+        self.db.set_state("daemon_enabled", "false")
+        self._emit("daemon_status", self.daemon_status())
+        return self.daemon_status()
+
+    def _run_daemon_tick_sync(self) -> None:
+        if self.db.get_state("system_status", "RUNNING") != "RUNNING":
+            return
+        sym = self.db.get_state("active_ticker", self.settings.trading_symbol) or self.settings.trading_symbol
+        mode = self.db.get_state("source_mode", "replay") or "replay"
+        tf = self.db.get_state("candle_interval", self.settings.candle_interval) or "1d"
+        if mode == "live":
+            self.run_single_live_cycle(symbol=sym, gateway_key=self.settings.gateway_api_key, interval=tf)
+            self._daemon_cycles_run += 1
+        else:
+            full_df = self.market_client.load_replay_candles(symbol=sym, interval=tf)
+            for idx in range(45, len(full_df)):
+                close_t = str(full_df.iloc[idx]["close_time"])
+                if not self.db.is_candle_processed(sym, tf, close_t, "replay"):
+                    self.process_candle_window(
+                        candles_df=full_df.iloc[: idx + 1].reset_index(drop=True),
+                        symbol=sym,
+                        interval=tf,
+                        source_mode="replay",
+                        gateway_key=self.settings.gateway_api_key,
+                    )
+                    self._daemon_cycles_run += 1
+                    break
+
+    async def _daemon_loop(self) -> None:
+        while self._daemon_enabled:
+            try:
+                self._daemon_last_tick_utc = utc_now_iso()
+                await asyncio.to_thread(self._run_daemon_tick_sync)
+                self._daemon_last_error = None
+            except DuplicateCandleError:
+                pass
+            except Exception as exc:
+                self._daemon_last_error = str(exc)[:200]
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=float(self._daemon_poll_seconds))
+                break
+            except asyncio.TimeoutError:
+                continue
 
     def process_candle_window(
         self,
@@ -82,7 +181,7 @@ class TradingScheduler:
         extra_metadata: str = "",
     ) -> Dict[str, Any]:
         """
-        Ejecuta las 7 etapas del ciclo sobre la última vela cerrada de `candles_df`.
+        Ejecuta el ciclo multi-agente sobre la última vela cerrada de `candles_df`.
         """
         t_cycle_start = time.perf_counter()
         if candles_df.empty:
@@ -106,16 +205,60 @@ class TradingScheduler:
         t_stage = time.perf_counter()
         candle_id = self.db.register_candle_idempotent(candle_dict)
         ingest_ms = (time.perf_counter() - t_stage) * 1000.0
+        self._emit(
+            "stage_ingest",
+            {
+                "symbol": symbol,
+                "interval": interval,
+                "close": float(last_row["close"]),
+                "candle_close_utc": candle_dict["close_time"],
+                "latency_ms": round(ingest_ms, 2),
+            },
+        )
 
-        # Etapa 2: Generación de Alpha Cuantitativo (T4 LSTM congelado)
+        # Etapa 2: Generación de Alpha Cuantitativo Multi-Temporalidad (Quant v2 XGB + LSTM)
         t_stage = time.perf_counter()
-        prediction = self.predictor.predict_from_candles(candles_df, symbol=symbol)
+        prediction = self.predictor.predict_from_candles(candles_df, symbol=symbol, interval=interval)
         last_price = float(last_row["close"])
-        portfolio = self.paper_engine.get_portfolio_state(current_price=last_price)
+        portfolio = self.paper_engine.get_portfolio_state(
+            current_price=last_price,
+            symbol=symbol,
+            candle_time=candle_dict["close_time"],
+        )
         position_open = portfolio.position_qty >= self.settings.min_lot_size
         lstm_ms = (time.perf_counter() - t_stage) * 1000.0
+        self._emit(
+            "stage_quant_model",
+            {
+                "symbol": symbol,
+                "interval": interval,
+                "pred_return_t1": round(prediction.pred_return_t1, 6),
+                "atr_14": round(prediction.atr_14, 4),
+                "model_detail": prediction.model_detail,
+                "latency_ms": round(lstm_ms, 2),
+            },
+        )
 
-        # Etapa 3: Laya #1 [DISPOSITIVO LOCAL - DRL / OLLAMA /v1/systemone]
+        # Etapa 2b: Noticias / Sentimiento y Memoria Episódica Post-Trade
+        t_stage = time.perf_counter()
+        news_context: Dict[str, Any] = {}
+        if self.news_service is not None:
+            news_context = self.news_service.get_symbol_context(
+                symbol=symbol, source_mode=source_mode
+            )
+        episodic_memories = self.db.list_episodic_memories(symbol=symbol, limit=3)
+        news_memory_ms = (time.perf_counter() - t_stage) * 1000.0
+        self._emit(
+            "stage_news_memory",
+            {
+                "symbol": symbol,
+                "sentiment_label": news_context.get("sentiment_label", "NEUTRAL"),
+                "memories_count": len(episodic_memories),
+                "latency_ms": round(news_memory_ms, 2),
+            },
+        )
+
+        # Etapa 3: Laya #1 [DISPOSITIVO LOCAL - DRL PyTorch / Ollama Fallback]
         t_stage = time.perf_counter()
         laya1_out = self.laya_alpha.evaluate(
             prediction=prediction,
@@ -124,8 +267,19 @@ class TradingScheduler:
             strict_live=strict_live_llm,
         )
         laya1_ms = (time.perf_counter() - t_stage) * 1000.0
+        self._emit(
+            "stage_laya1_drl",
+            {
+                "symbol": symbol,
+                "regime": laya1_out.regime,
+                "signal_action": laya1_out.signal_action,
+                "conviction_score": round(laya1_out.conviction_score, 4),
+                "recommended_exposure_pct": round(laya1_out.recommended_exposure_pct, 4),
+                "latency_ms": round(laya1_ms, 2),
+            },
+        )
 
-        # Etapa 4: Qwen [API EXTERNA o LOCAL 6GB] + Validación Pydantic + Retroalimentación
+        # Etapa 4: Qwen [API EXTERNA o LOCAL 3B] + Debate Bull/Bear + Retroalimentación
         t_stage = time.perf_counter()
         qwen_out = self.qwen_agent.orchestrate(
             prediction=prediction,
@@ -133,8 +287,21 @@ class TradingScheduler:
             portfolio=portfolio,
             gateway_key=gateway_key,
             strict_live=strict_live_llm,
+            news_context=news_context,
+            episodic_memories=episodic_memories,
         )
         qwen_ms = (time.perf_counter() - t_stage) * 1000.0
+        self._emit(
+            "stage_qwen_orch",
+            {
+                "symbol": symbol,
+                "action": qwen_out["action"],
+                "execution_mode": qwen_out.get("execution_mode"),
+                "model": qwen_out.get("model"),
+                "is_fallback": bool(qwen_out.get("is_fallback", False)),
+                "latency_ms": round(qwen_ms, 2),
+            },
+        )
 
         # Etapa 4b: Entrega y aplicación de retroalimentación de Qwen hacia Laya #1 y Laya #2
         orch_fb = qwen_out.get("orchestrator_feedback", {}) or {}
@@ -149,10 +316,20 @@ class TradingScheduler:
         feedback_applied = {
             "to_laya1": fb_laya1_applied,
             "to_laya2": fb_laya2_applied,
+            "feedback_source": orch_fb.get("feedback_source", "rule_fallback"),
         }
         qwen_out["feedback_applied"] = feedback_applied
+        self._emit(
+            "stage_feedback",
+            {
+                "symbol": symbol,
+                "feedback_source": feedback_applied["feedback_source"],
+                "feedback_laya1_ms": round(feedback_laya1_ms, 2),
+                "feedback_laya2_ms": round(feedback_laya2_ms, 2),
+            },
+        )
 
-        # Etapa 5: Laya #2 [DISPOSITIVO LOCAL - OLLAMA /v1/systemone]
+        # Etapa 5: Laya #2 [DISPOSITIVO LOCAL - OLLAMA]
         t_stage = time.perf_counter()
         laya2_out = self.laya_guard.audit(
             prediction=prediction,
@@ -163,8 +340,20 @@ class TradingScheduler:
             strict_live=strict_live_llm,
         )
         laya2_ms = (time.perf_counter() - t_stage) * 1000.0
+        self._emit(
+            "stage_laya2_guard",
+            {
+                "symbol": symbol,
+                "approved": laya2_out.approved,
+                "security_status": laya2_out.security_status,
+                "coherence_prob": round(laya2_out.coherence_prob, 3),
+                "min_coherence_threshold": round(laya2_out.min_coherence_threshold, 2),
+                "is_fallback": laya2_out.is_fallback,
+                "latency_ms": round(laya2_ms, 2),
+            },
+        )
 
-        # Etapa 6 & 7: Motor Determinista de Riesgo + Liquidación Paper
+        # Etapa 6 & 7: Motor Determinista de Riesgo (con SL/TP/TSL) + Liquidación Paper
         t_stage = time.perf_counter()
         system_status = self.db.get_state("system_status", "RUNNING") or "RUNNING"
         verdict = self.risk_engine.evaluate(
@@ -175,12 +364,18 @@ class TradingScheduler:
             system_status=system_status,
             laya2_approved=laya2_out.approved,
             laya2_reason=laya2_out.reason,
+            atr_14=prediction.atr_14,
+            candle_low=float(last_row["low"]),
+            candle_high=float(last_row["high"]),
         )
 
         sim_exec = self.paper_engine.simulate_execution(
             action=verdict.final_action,
             symbol=symbol,
             market_price=last_price,
+            atr_14=prediction.atr_14,
+            conviction_score=laya1_out.conviction_score,
+            vol_20=prediction.vol_20,
         )
         sim_exec["snapshot"]["candle_time"] = candle_dict["close_time"]
         sim_exec["snapshot"]["source_mode"] = source_mode
@@ -190,6 +385,7 @@ class TradingScheduler:
         stage_latencies_ms = {
             "ingest_ms": round(ingest_ms, 2),
             "lstm_ms": round(lstm_ms, 2),
+            "news_memory_ms": round(news_memory_ms, 2),
             "laya1_ms": round(laya1_ms, 2),
             "qwen_ms": round(qwen_ms, 2),
             "feedback_laya1_ms": round(feedback_laya1_ms, 2),
@@ -227,6 +423,73 @@ class TradingScheduler:
         )
         self.db.set_state("peak_equity", str(sim_exec["peak_equity"]))
 
+        # Memoria Episódica Post-Trade al cerrar operación SELL
+        order_obj = sim_exec["order"]
+        if order_obj is not None and order_obj.get("side") == "SELL":
+            entry_px = float(order_obj.get("avg_entry_price") or last_price)
+            exit_px = float(order_obj["exec_price"])
+            realized = float(order_obj.get("realized_pnl") or 0.0)
+            ret_pct = ((exit_px - entry_px) / entry_px * 100.0) if entry_px > 0 else 0.0
+            outcome = "WIN" if realized > 0.0 else ("LOSS" if realized < 0.0 else "BREAKEVEN")
+            trigger = verdict.rule_triggered if verdict.rule_triggered != "NONE" else "QWEN_SIGNAL"
+            lesson = (
+                f"[{outcome} {ret_pct:+.2f}%] Cierre en {symbol} vía {trigger} "
+                f"(régimen={laya1_out.regime}, RSI={prediction.rsi_14:.1f}, vol={prediction.vol_20:.4f}, PnL=${realized:+.2f})."
+            )
+            self.db.add_episodic_memory(
+                {
+                    "symbol": symbol,
+                    "interval": interval,
+                    "candle_time": candle_dict["close_time"],
+                    "entry_price": entry_px,
+                    "exit_price": exit_px,
+                    "realized_pnl": realized,
+                    "return_pct": round(ret_pct, 4),
+                    "regime": laya1_out.regime,
+                    "rsi_at_entry": float(prediction.rsi_14),
+                    "vol_at_entry": float(prediction.vol_20),
+                    "outcome": outcome,
+                    "lesson": lesson,
+                }
+            )
+
+        if self.telemetry is not None:
+            self.telemetry.record_agent_status(
+                qwen_mode=str(qwen_out.get("execution_mode", QWEN_EXECUTION_LOCATION)),
+                qwen_model=str(qwen_out.get("model", "")),
+                qwen_transport=str(qwen_out.get("transport", "")),
+                qwen_is_fallback=bool(qwen_out.get("is_fallback", False)),
+                qwen_latency_ms=qwen_ms,
+                laya2_model=laya2_out.model,
+                laya2_transport=laya2_out.transport,
+                laya2_is_fallback=laya2_out.is_fallback,
+                laya2_latency_ms=laya2_ms,
+            )
+
+        self._emit(
+            "stage_risk_paper",
+            {
+                "symbol": symbol,
+                "risk_status": verdict.status,
+                "final_action": verdict.final_action,
+                "rule_triggered": verdict.rule_triggered,
+                "equity": round(float(sim_exec["snapshot"]["total_equity"]), 2),
+                "latency_ms": round(risk_paper_ms, 2),
+            },
+        )
+        self._emit(
+            "cycle_complete",
+            {
+                "decision_id": decision_id,
+                "symbol": symbol,
+                "interval": interval,
+                "final_action": verdict.final_action,
+                "risk_status": verdict.status,
+                "total_equity": round(float(sim_exec["snapshot"]["total_equity"]), 2),
+                "total_cycle_ms": round(total_latency_ms, 2),
+            },
+        )
+
         return {
             "decision_id": decision_id,
             "candle_id": candle_id,
@@ -235,12 +498,16 @@ class TradingScheduler:
             "close_price": last_price,
             "source_mode": source_mode,
             "pred_return_t1": prediction.pred_return_t1,
+            "model_detail": prediction.model_detail,
+            "atr_14": round(prediction.atr_14, 4),
             "indicators": {
                 "ema_ratio": prediction.ema_ratio,
                 "vol_20": prediction.vol_20,
                 "rsi_14": prediction.rsi_14,
                 "momentum_5": prediction.momentum_5,
+                "atr_14": prediction.atr_14,
             },
+            "news_context": news_context,
             "laya1": laya1_out.to_dict(),
             "qwen": qwen_out,
             "laya2": laya2_out.to_dict(),
@@ -299,7 +566,6 @@ class TradingScheduler:
         results: List[Dict[str, Any]] = []
 
         for end_idx in range(start_end_idx, len(full_df)):
-            # Si fue pausado/detenido a mitad de un replay, respetamos el estado excepto si queremos verificar bloqueo STOP
             window_df = full_df.iloc[: end_idx + 1].reset_index(drop=True)
             try:
                 res = self.process_candle_window(
@@ -311,7 +577,6 @@ class TradingScheduler:
                 )
                 results.append(res)
             except DuplicateCandleError:
-                # Idempotencia: vela ya procesada previamente en este modo
                 continue
             except (InsufficientFundsError, SystemStoppedError):
                 continue

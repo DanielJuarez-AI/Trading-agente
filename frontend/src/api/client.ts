@@ -52,6 +52,9 @@ export interface StageLatenciesMs {
 }
 
 export interface SystemStatusResponse {
+  app_version?: string;
+  commit_count?: number;
+  release_milestone?: string;
   system_status: 'RUNNING' | 'PAUSED' | 'STOPPED';
   active_ticker: string;
   source_mode: 'live' | 'replay';

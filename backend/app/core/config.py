@@ -12,6 +12,7 @@ ARQUITECTURA HÍBRIDA EXPLÍCITA:
 from __future__ import annotations
 
 import os
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -24,6 +25,48 @@ CONFIG_DIR = REPO_ROOT / "config"
 ARTIFACTS_DIR = REPO_ROOT / "notebooks" / "artifacts"
 EXPORTS_DIR = REPO_ROOT / "exports"
 DATA_DIR = REPO_ROOT / "data"
+BASE_RELEASE_VERSION: str = "0.1"
+
+
+def get_app_version_info() -> Dict[str, Any]:
+    """
+    Calcula la versión dinámica del sistema basada en el hito V.0.1 y el conteo
+    real de commits en Git (formato v0.1.<commits>).
+    """
+    commit_count = 10
+    git_sha = "local"
+    try:
+        cnt_proc = subprocess.run(
+            ["git", "rev-list", "--count", "HEAD"],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+            timeout=1.5,
+            check=False,
+        )
+        if cnt_proc.returncode == 0 and cnt_proc.stdout.strip().isdigit():
+            commit_count = int(cnt_proc.stdout.strip())
+        sha_proc = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+            timeout=1.5,
+            check=False,
+        )
+        if sha_proc.returncode == 0 and sha_proc.stdout.strip():
+            git_sha = sha_proc.stdout.strip()
+    except Exception:
+        pass
+
+    semver = f"{BASE_RELEASE_VERSION}.{commit_count}"
+    return {
+        "version": f"v{semver}",
+        "semver": semver,
+        "release_milestone": "V.0.1",
+        "commit_count": commit_count,
+        "git_sha": git_sha,
+    }
 
 # ==============================================================================
 # UNIVERSO OFICIAL DE 30 TICKERS SOLICITADO POR EL USUARIO
@@ -97,7 +140,7 @@ class Settings:
     admin_control_token: str
 
     # --------------------------------------------------------------------------
-    # [SWITCH QWEN: API EXTERNA 14B <-> LOCAL 6 GB VRAM (qwen2.5:7b-instruct-q4_K_M)]
+    # [SWITCH QWEN: API EXTERNA 14B <-> LOCAL 6 GB VRAM (qwen2.5-3b-quant:latest)]
     # --------------------------------------------------------------------------
     qwen_execution_mode: str
     qwen_is_local: bool
@@ -136,6 +179,10 @@ class Settings:
     allow_leverage: bool
     max_data_age_seconds: int
     sqlite_db_path: Path
+    stop_loss_atr_mult: float = 2.0
+    take_profit_atr_mult: float = 3.5
+    trailing_stop_pct: float = 0.035
+    max_single_position_pct: float = 0.45
 
     # Tickers y configuraciones cargadas
     primary_tickers: List[str] = field(default_factory=lambda: list(PRIMARY_TICKERS))
@@ -173,15 +220,15 @@ class Settings:
             "laya_alpha": {
                 "execution_mode": self.laya_execution_mode,
                 "is_local_device": self.laya_is_local,
-                "location_label": "DISPOSITIVO LOCAL (DRL Dueling A2C + Ollama /v1/systemone)",
-                "endpoint": f"{self.ollama_base_url.rstrip('/')}/v1/systemone",
-                "model": f"{self.laya_model_name} + laya1_drl_v1",
+                "location_label": "DISPOSITIVO LOCAL (DRL Dueling A2C PyTorch)",
+                "endpoint": "pytorch://laya1_drl_v1.pt (Ollama /v1/systemone fallback en strict_live)",
+                "model": f"laya1_drl_v1 + {self.laya_model_name}",
             },
             "laya_guard": {
                 "execution_mode": self.laya_execution_mode,
                 "is_local_device": self.laya_is_local,
-                "location_label": "DISPOSITIVO LOCAL (Ollama /v1/systemone)",
-                "endpoint": f"{self.ollama_base_url.rstrip('/')}/v1/systemone",
+                "location_label": "DISPOSITIVO LOCAL (Ollama /api/generate + /v1/systemone)",
+                "endpoint": f"{self.ollama_base_url.rstrip('/')}/api/generate",
                 "model": self.laya_model_name,
             },
         }
@@ -247,7 +294,7 @@ def get_settings() -> Settings:
         ),
         qwen_local_model_name=os.getenv(
             "QWEN_LOCAL_MODEL_NAME",
-            str(qwen_local_yaml.get("model", "qwen2.5:7b-instruct-q4_K_M")),
+            str(qwen_local_yaml.get("model", "qwen2.5-3b-quant:latest")),
         ),
         qwen_local_vram_budget_gb=float(
             os.getenv(
@@ -258,11 +305,11 @@ def get_settings() -> Settings:
         qwen_local_num_ctx=int(
             os.getenv(
                 "QWEN_LOCAL_NUM_CTX",
-                str(qwen_local_yaml.get("num_ctx", 2048)),
+                str(qwen_local_yaml.get("num_ctx", 4096)),
             )
         ),
         qwen_temperature=float(qwen_yaml.get("temperature", 0.1)),
-        qwen_max_tokens=int(qwen_yaml.get("max_tokens", 350)),
+        qwen_max_tokens=int(qwen_yaml.get("max_tokens", 450)),
         # [DISPOSITIVO LOCAL - OLLAMA /v1/systemone] Dual Laya
         laya_execution_mode=os.getenv("LAYA_EXECUTION_MODE", LAYA_EXECUTION_MODE),
         laya_is_local=True,
@@ -301,6 +348,30 @@ def get_settings() -> Settings:
             os.getenv(
                 "MAX_DATA_AGE_SECONDS",
                 str(risk_controls.get("max_data_age_seconds", 172800)),
+            )
+        ),
+        stop_loss_atr_mult=float(
+            os.getenv(
+                "STOP_LOSS_ATR_MULT",
+                str(risk_controls.get("stop_loss_atr_mult", 2.0)),
+            )
+        ),
+        take_profit_atr_mult=float(
+            os.getenv(
+                "TAKE_PROFIT_ATR_MULT",
+                str(risk_controls.get("take_profit_atr_mult", 3.5)),
+            )
+        ),
+        trailing_stop_pct=float(
+            os.getenv(
+                "TRAILING_STOP_PCT",
+                str(risk_controls.get("trailing_stop_pct", 0.035)),
+            )
+        ),
+        max_single_position_pct=float(
+            os.getenv(
+                "MAX_SINGLE_POSITION_PCT",
+                str(risk_controls.get("max_single_position_pct", 0.45)),
             )
         ),
         sqlite_db_path=db_path,

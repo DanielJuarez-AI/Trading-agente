@@ -29,6 +29,10 @@ risk_controls:
   allow_short_selling: false
   enable_real_trading: false
   max_data_age_seconds: 172800
+  stop_loss_atr_mult: 2.0
+  take_profit_atr_mult: 3.5
+  trailing_stop_pct: 0.035
+  max_single_position_pct: 0.45
 
 # Universo oficial de 30 activos + alias MEXC BTCUSDT
 primary_tickers:

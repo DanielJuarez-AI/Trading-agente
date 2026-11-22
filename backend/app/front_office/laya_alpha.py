@@ -122,6 +122,9 @@ class LayaAlphaOutput:
     model: str
     payload_token_estimate: int
     qwen_feedback: Optional[Dict[str, Any]] = None
+    q_values: Optional[Dict[str, float]] = None
+    recommended_exposure_pct: float = 0.35
+    is_fallback: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -139,6 +142,9 @@ class LayaAlphaOutput:
             "latency_ms": round(self.latency_ms, 2),
             "payload_token_estimate": self.payload_token_estimate,
             "qwen_feedback": self.qwen_feedback or {},
+            "q_values": self.q_values or {},
+            "recommended_exposure_pct": round(self.recommended_exposure_pct, 4),
+            "is_fallback": self.is_fallback,
         }
 
 
@@ -328,6 +334,14 @@ class LayaAlphaAgent:
             else:
                 conv_level = "very_low"
 
+            vol_scale = float(np.clip(0.018 / max(prediction.vol_20, 0.005), 0.35, 1.0))
+            max_single = float(getattr(self.settings, "max_single_position_pct", 0.45))
+            rec_exp = float(np.clip(max_single * vol_scale * conv_score * 1.35, 0.12, max_single))
+            q_dict = {
+                act: round(float(q_vals[0, i].item()), 4)
+                for i, act in enumerate(DRL_ACTIONS)
+            }
+
             return {
                 "regime": regime,
                 "regime_probs": regime_probs,
@@ -337,6 +351,9 @@ class LayaAlphaAgent:
                 "conviction_score": round(conv_score, 4),
                 "transport": "local_drl_dueling_a2c_v1",
                 "model": f"{self.settings.laya_model_name} ({self.drl_model_tag})",
+                "q_values": q_dict,
+                "recommended_exposure_pct": round(rec_exp, 4),
+                "is_fallback": False,
             }
 
         r = prediction.pred_return_t1
@@ -411,6 +428,11 @@ class LayaAlphaAgent:
             "conviction_score": conv_score,
             "transport": "local_rlcd_calibrated_fallback",
             "model": self.settings.laya_model_name,
+            "q_values": {},
+            "recommended_exposure_pct": round(
+                min(0.35, float(getattr(self.settings, "max_single_position_pct", 0.45))), 4
+            ),
+            "is_fallback": True,
         }
 
     def evaluate(
@@ -463,6 +485,9 @@ class LayaAlphaAgent:
                 model=str(cal.get("model", self.settings.laya_model_name)),
                 payload_token_estimate=token_est,
                 qwen_feedback=dict(self.last_qwen_feedback),
+                q_values=cal.get("q_values", {}),
+                recommended_exposure_pct=float(cal.get("recommended_exposure_pct", 0.35)),
+                is_fallback=bool(cal.get("is_fallback", False)),
             )
 
         owns_client = self.http_client is None
@@ -585,6 +610,9 @@ class LayaAlphaAgent:
                 model=str(cal.get("model", self.settings.laya_model_name)),
                 payload_token_estimate=token_est,
                 qwen_feedback=dict(self.last_qwen_feedback),
+                q_values=cal.get("q_values", {}),
+                recommended_exposure_pct=float(cal.get("recommended_exposure_pct", 0.35)),
+                is_fallback=bool(cal.get("is_fallback", False)),
             )
         finally:
             if owns_client:

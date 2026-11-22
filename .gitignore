@@ -1,38 +1,69 @@
-# Environment & Secrets
+# ==============================================================================
+# Entorno y Secretos (NUNCA versionar claves reales)
+# ==============================================================================
 .env
 .env.*
 !.env.example
+*.pem
+*.key
 
-# Databases
+# ==============================================================================
+# Bases de datos SQLite (WAL / SHM / Journal)
+# ==============================================================================
 *.db
 *.db-shm
 *.db-wal
+*.db-journal
 *.sqlite
+*.sqlite-shm
+*.sqlite-wal
 *.sqlite3
+data/*.db*
 
-# Python
+# ==============================================================================
+# Python, Entornos Virtuales, Cachés y Testing
+# ==============================================================================
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
+*.egg-info/
 .Python
 .venv/
 venv/
 env/
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
 .coverage
 htmlcov/
+.tox/
 
-# Node / Frontend
+# ==============================================================================
+# Jupyter Notebooks
+# ==============================================================================
+.ipynb_checkpoints/
+notebooks/.ipynb_checkpoints/
+
+# ==============================================================================
+# Node / Frontend Build y Logs
+# ==============================================================================
 node_modules/
 frontend/node_modules/
 frontend/dist/
 dist/
 build/
 *.log
+logs/
 
-# OS / IDE
+# ==============================================================================
+# Sistema Operativo e IDEs
+# ==============================================================================
 .DS_Store
 Thumbs.db
+desktop.ini
 .vscode/
 .idea/
+*.swp
+*.swo
+*~

@@ -10,6 +10,7 @@ Topología explícita:
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -22,10 +23,13 @@ from backend.app.api.routes import router as api_router
 from backend.app.back_office.database import TradingDatabase
 from backend.app.back_office.mexc_client import MEXCMarketClient
 from backend.app.back_office.paper_engine import PaperTradingEngine
-from backend.app.core.config import Settings, get_settings
+from backend.app.core.config import Settings, get_app_version_info, get_settings
+from backend.app.core.events import PipelineEventBus
 from backend.app.core.scheduler import TradingScheduler
 from backend.app.core.security import PrivateAuthGateway
+from backend.app.core.telemetry import SystemTelemetryService
 from backend.app.front_office.laya_alpha import LayaAlphaAgent
+from backend.app.front_office.news_sentiment import NewsSentimentService
 from backend.app.front_office.predictor import QuantPredictor
 from backend.app.middle_office.laya_guard import LayaGuardAgent
 from backend.app.middle_office.risk_engine import DeterministicRiskEngine
@@ -51,6 +55,9 @@ def create_app(settings_override: Optional[Settings] = None) -> FastAPI:
     )
 
     gateway = PrivateAuthGateway(cfg, db)
+    event_bus = PipelineEventBus()
+    telemetry = SystemTelemetryService(cfg, db)
+    news_service = NewsSentimentService()
     market_client = MEXCMarketClient(cfg, db)
     predictor = QuantPredictor()
     laya_alpha = LayaAlphaAgent(cfg, db, gateway)
@@ -69,17 +76,25 @@ def create_app(settings_override: Optional[Settings] = None) -> FastAPI:
         laya_guard=laya_guard,
         risk_engine=risk_engine,
         paper_engine=paper_engine,
+        event_bus=event_bus,
+        news_service=news_service,
+        telemetry=telemetry,
     )
 
     @asynccontextmanager
     async def lifespan(fastapi_app: FastAPI):
-        # Al arrancar, recuperar estado exacto desde SQLite WAL
+        # Al arrancar, recuperar estado exacto desde SQLite WAL y enlazar event_bus
         fastapi_app.state.recovered_status = db.get_state("system_status", "RUNNING")
-        yield
+        event_bus.set_loop(asyncio.get_running_loop())
+        try:
+            yield
+        finally:
+            await scheduler.stop_daemon()
 
+    ver_info = get_app_version_info()
     application = FastAPI(
         title="Quant Multi-Agent Trader (Qwen API Externa + Dual Laya Local)",
-        version="1.0.0",
+        version=ver_info["semver"],
         description=(
             "Sistema cuantitativo híbrido Front/Middle/Back Office con Qwen 14B por API externa "
             "y Dual Laya en dispositivo local, sobre universo de 30 tickers."
@@ -100,8 +115,12 @@ def create_app(settings_override: Optional[Settings] = None) -> FastAPI:
     )
 
     application.state.settings = cfg
+    application.state.version_info = ver_info
     application.state.db = db
     application.state.gateway = gateway
+    application.state.event_bus = event_bus
+    application.state.telemetry = telemetry
+    application.state.news_service = news_service
     application.state.market_client = market_client
     application.state.predictor = predictor
     application.state.laya_alpha = laya_alpha
@@ -123,8 +142,13 @@ def create_app(settings_override: Optional[Settings] = None) -> FastAPI:
 
     @application.get("/health", tags=["health"])
     def healthcheck():
+        v = get_app_version_info()
         return {
             "status": "ok",
+            "app_version": v["version"],
+            "release_milestone": v["release_milestone"],
+            "commit_count": v["commit_count"],
+            "git_sha": v["git_sha"],
             "system_status": db.get_state("system_status", "RUNNING"),
             "qwen_execution_mode": cfg.qwen_execution_mode,
             "qwen_is_local": cfg.qwen_is_local,

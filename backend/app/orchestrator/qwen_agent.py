@@ -1,21 +1,18 @@
 """
-Orquestador Central System-2 - Agente Qwen 14B.
+Orquestador Central System-2 - Agente Qwen (API Externa 14B <-> Ollama Local 3B <= 6GB VRAM).
 
-# ==============================================================================
-# [API EXTERNA - NO EN DISPOSITIVO LOCAL]
-# IMPORTANTE: Qwen 14B NO se ejecuta en Ollama ni en el dispositivo local.
-# Se invoca exclusivamente mediante peticiones HTTP REST a una API externa
-# compatible con OpenAI / DashScope / OpenRouter (QWEN_API_BASE_URL + QWEN_API_KEY).
-# Todo lo demás del pipeline (Laya #1, Laya #2, Predictor T4, Riesgo, SQLite)
-# sí corre en el dispositivo local.
-# ==============================================================================
+Incluye:
+- Debate estructurado Bull vs. Bear en una sola llamada JSON.
+- Contexto ortogonal de Noticias/Sentimiento y Memoria Episódica Post-Trade (FinMem).
+- Emisión real de retroalimentación calibrada hacia Laya #1 (DRL) y Laya #2 (Guardia),
+  con fallback determinista auditado y trazabilidad explícita Real LLM vs Fallback.
 """
 
 from __future__ import annotations
 
 import json
 import time
-from typing import Any, Dict, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 import httpx
 from pydantic import BaseModel, Field, ValidationError, field_validator
@@ -30,7 +27,7 @@ from backend.app.front_office.laya_alpha import (
 )
 from backend.app.front_office.predictor import PredictionResult
 
-# Marcadores explícitos de inferencia por API externa (NO local)
+# Marcadores por defecto de topología (sobreescritos cuando el switch está en LOCAL_DEVICE)
 QWEN_EXECUTION_LOCATION: str = "EXTERNAL_API"
 QWEN_IS_LOCAL_DEVICE: bool = False
 
@@ -40,12 +37,16 @@ class QwenInvalidOutputError(ValueError):
 
 
 class QwenDecisionOutput(BaseModel):
-    """Contrato JSON estricto obligatorio de la Sección 5.2.B."""
+    """Contrato JSON estricto obligatorio (4 claves core + debate & feedback estructurado)."""
 
     action: Literal["BUY", "HOLD", "SELL"]
     symbol: str = Field(..., min_length=1, max_length=20)
     candle_date: str = Field(..., min_length=10, max_length=40)
     justification: str = Field(..., min_length=1, max_length=280)
+    bull_case: str = Field(default="", max_length=260)
+    bear_case: str = Field(default="", max_length=260)
+    feedback_to_laya1: Optional[Dict[str, Any]] = None
+    feedback_to_laya2: Optional[Dict[str, Any]] = None
 
     @field_validator("justification")
     @classmethod
@@ -60,9 +61,9 @@ class QwenDecisionOutput(BaseModel):
 
 class QwenOrchestratorAgent:
     """
-    [API EXTERNA - NO EN DISPOSITIVO LOCAL]
-    Coordina señales de Front Office (LSTM T4 + Laya #1 Local) y produce el dictamen JSON
-    estricto mediante llamada HTTPS al endpoint remoto de Qwen 14B.
+    Orquestador System-2: coordina Front Office (Quant v2 + Laya #1 DRL),
+    Noticias/Sentimiento y Memoria Episódica, generando dictamen JSON,
+    debate Bull/Bear y retroalimentación hacia Laya #1 y Laya #2.
     """
 
     def __init__(
@@ -94,24 +95,43 @@ class QwenOrchestratorAgent:
         prediction: PredictionResult,
         laya1: LayaAlphaOutput,
         portfolio: PortfolioState,
+        news_context: Optional[Dict[str, Any]] = None,
+        episodic_memories: Optional[List[Dict[str, Any]]] = None,
     ) -> list[Dict[str, str]]:
         system_prompt = (
             "Eres el Orquestador Cuantitativo System-2 de un fondo Long-Only. "
-            "Responde EXCLUSIVAMENTE con un objeto JSON válido con exactamente 4 claves:\n"
+            "Evalúa los indicadores, el triaje DRL de Laya #1, noticias y memoria de operaciones pasadas. "
+            "Responde EXCLUSIVAMENTE con un objeto JSON válido con estas claves:\n"
             f'{{"action": "BUY|HOLD|SELL", "symbol": "{prediction.symbol}", '
             f'"candle_date": "{prediction.candle_close_utc}", '
-            '"justification": "Explicación concisa en español basada en los números reales"}}\n'
+            '"justification": "Explicación concisa en español max 280 chars", '
+            '"bull_case": "Argumento alcista breve", "bear_case": "Argumento bajista breve", '
+            '"feedback_to_laya1": {"temperature_delta": 0.0, "conviction_bias": 0.0, "guidance": "Instrucción corta para calibrar DRL"}, '
+            '"feedback_to_laya2": {"strictness_level": "standard|strict", "min_coherence_threshold": 0.75, "focus_rule": "REGLA_AUDITORIA"}}\n'
             "Reglas estrictas: SELL solo si position_qty > 0; BUY solo si pred_return_t1 >= 0 y position_qty == 0; "
             "en otro caso elige HOLD. No cambies symbol ni candle_date."
         )
+        memories_compact = [
+            {
+                "candle_time": m.get("candle_time"),
+                "outcome": m.get("outcome"),
+                "return_pct": round(float(m.get("return_pct", 0.0)), 2),
+                "regime": m.get("regime"),
+                "lesson": str(m.get("lesson", ""))[:140],
+            }
+            for m in (episodic_memories or [])[:3]
+        ]
         user_payload = {
             "symbol": prediction.symbol,
+            "interval": getattr(prediction, "interval", "1d"),
             "candle_date": prediction.candle_close_utc,
-            "quant_model_t4": {
+            "quant_model": {
+                "model_detail": getattr(prediction, "model_detail", prediction.model_version),
                 "pred_return_t1": round(prediction.pred_return_t1, 6),
                 "direction": prediction.direction,
                 "ema_ratio": round(prediction.ema_ratio, 6),
                 "vol_20": round(prediction.vol_20, 6),
+                "atr_14": round(getattr(prediction, "atr_14", 0.0), 4),
                 "rsi_14": round(prediction.rsi_14, 2),
             },
             "laya1_local_system1": {
@@ -119,13 +139,25 @@ class QwenOrchestratorAgent:
                 "signal_action": laya1.signal_action,
                 "conviction_level": laya1.conviction_level,
                 "conviction_score": round(laya1.conviction_score, 3),
+                "recommended_exposure_pct": round(getattr(laya1, "recommended_exposure_pct", 0.35), 3),
             },
             "portfolio": {
                 "cash": round(portfolio.cash, 2),
                 "position_qty": round(portfolio.position_qty, 6),
+                "avg_entry_price": round(portfolio.avg_entry_price, 4),
+                "stop_loss_price": portfolio.stop_loss_price,
+                "take_profit_price": portfolio.take_profit_price,
                 "total_equity": round(portfolio.total_equity, 2),
+                "total_exposure_pct": round(getattr(portfolio, "total_exposure_pct", 0.0), 4),
                 "drawdown_pct": round(portfolio.drawdown_pct, 4),
             },
+            "news_sentiment": {
+                "label": (news_context or {}).get("sentiment_label", "NEUTRAL"),
+                "score": (news_context or {}).get("sentiment_score", 0.0),
+                "catalysts": (news_context or {}).get("catalysts", []),
+                "headlines": ((news_context or {}).get("headlines") or [])[:3],
+            },
+            "episodic_memories": memories_compact,
         }
         return [
             {"role": "system", "content": system_prompt},
@@ -147,8 +179,9 @@ class QwenOrchestratorAgent:
         prediction: PredictionResult,
         laya1: LayaAlphaOutput,
         portfolio: PortfolioState,
+        news_context: Optional[Dict[str, Any]] = None,
     ) -> str:
-        """Normaliza JSON del modelo local cuantizado para garantizar contrato exacto y coherencia Long-Only."""
+        """Normaliza JSON del modelo local para garantizar contrato exacto y coherencia Long-Only."""
         has_pos = portfolio.position_qty >= self.settings.min_lot_size
         try:
             cleaned = self._extract_json_text(raw_content)
@@ -161,6 +194,7 @@ class QwenOrchestratorAgent:
                 laya1,
                 portfolio,
                 mode_tag=f"Qwen Local ({self.settings.qwen_local_model_name})",
+                news_context=news_context,
             )
             return json.dumps(fallback, ensure_ascii=False)
 
@@ -179,17 +213,24 @@ class QwenOrchestratorAgent:
                 laya1,
                 portfolio,
                 mode_tag=f"Qwen Local ({self.settings.qwen_local_model_name})",
+                news_context=news_context,
             )
             just = fallback["justification"]
         if prediction.pred_return_t1 < 0 and "positivo" in just.lower() and "negativo" not in just.lower():
-            just = f"Retorno T4 negativo ({prediction.pred_return_t1 * 100:+.2f}%), postura prudente {action}."
+            just = f"Retorno cuantitativo negativo ({prediction.pred_return_t1 * 100:+.2f}%), postura prudente {action}."
 
-        normalized = {
+        normalized: Dict[str, Any] = {
             "action": action,
             "symbol": prediction.symbol,
             "candle_date": prediction.candle_close_utc,
             "justification": just[:280],
+            "bull_case": str(parsed.get("bull_case", "")).strip()[:260],
+            "bear_case": str(parsed.get("bear_case", "")).strip()[:260],
         }
+        if isinstance(parsed.get("feedback_to_laya1"), dict):
+            normalized["feedback_to_laya1"] = parsed["feedback_to_laya1"]
+        if isinstance(parsed.get("feedback_to_laya2"), dict):
+            normalized["feedback_to_laya2"] = parsed["feedback_to_laya2"]
         return json.dumps(normalized, ensure_ascii=False)
 
     def _validate_decision_contract(
@@ -235,52 +276,75 @@ class QwenOrchestratorAgent:
 
         return decision
 
+    @staticmethod
+    def _default_bull_bear(
+        prediction: PredictionResult,
+        laya1: LayaAlphaOutput,
+        news_context: Optional[Dict[str, Any]] = None,
+    ) -> tuple[str, str]:
+        r_pct = prediction.pred_return_t1 * 100.0
+        sent_label = (news_context or {}).get("sentiment_label", "NEUTRAL")
+        bull = (
+            f"Retorno T+1={r_pct:+.2f}%, EMA ratio={prediction.ema_ratio:.3f}, "
+            f"régimen DRL={laya1.regime}, sentimiento={sent_label}."
+        )
+        bear = (
+            f"Volatilidad vol_20={prediction.vol_20:.4f}, RSI={prediction.rsi_14:.1f}, "
+            f"convicción={laya1.conviction_score:.2f}."
+        )
+        return bull[:260], bear[:260]
+
     def _dry_run_external_api_simulation(
         self,
         prediction: PredictionResult,
         laya1: LayaAlphaOutput,
         portfolio: PortfolioState,
         mode_tag: str = "Qwen API Externa",
+        news_context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """
-        Simulación estructurada cuando aún no se configura QWEN_API_KEY o Ollama Local no está activo.
-        """
+        """Simulación estructurada cuando no hay API Key o Ollama Local está inaccesible."""
         r_pct = prediction.pred_return_t1 * 100.0
         has_pos = portfolio.position_qty >= self.settings.min_lot_size
+        sent_score = float((news_context or {}).get("sentiment_score", 0.0))
+        bearish_news_veto = sent_score <= -0.35
 
         if (
             laya1.signal_action == "BUY"
             and prediction.pred_return_t1 > 0.0005
             and laya1.regime != "high_vol_chop"
             and not has_pos
+            and not bearish_news_veto
         ):
             action = "BUY"
             just = (
-                f"[{mode_tag}] Pronóstico T4 positivo ({r_pct:+.2f}%), "
-                f"EMA ratio {prediction.ema_ratio:.3f} y Laya #1 DRL confirma {laya1.regime} "
-                f"(convicción {laya1.conviction_score:.2f})."
+                f"[{mode_tag}] Pronóstico {r_pct:+.2f}%, EMA {prediction.ema_ratio:.3f} y Laya #1 DRL "
+                f"{laya1.regime} (convicción {laya1.conviction_score:.2f})."
             )
         elif (
-            (laya1.signal_action == "SELL" or prediction.pred_return_t1 < -0.0008)
+            (laya1.signal_action == "SELL" or prediction.pred_return_t1 < -0.0008 or bearish_news_veto)
             and has_pos
         ):
             action = "SELL"
             just = (
-                f"[{mode_tag}] Pronóstico T4 negativo ({r_pct:+.2f}%), "
-                f"Laya #1 DRL reporta {laya1.regime}; se cierra posición Long para proteger capital."
+                f"[{mode_tag}] Señal de salida ({r_pct:+.2f}%, sentimiento={sent_score:+.2f}); "
+                f"Laya #1 DRL {laya1.regime}, cierre Long protector."
             )
         else:
             action = "HOLD"
+            reason_veto = " + veto noticias bajistas" if bearish_news_veto else ""
             just = (
-                f"[{mode_tag}] Pronóstico T4 {r_pct:+.2f}%, régimen {laya1.regime} "
-                f"(vol_20={prediction.vol_20:.4f}); se mantiene espera prudente ({'con posición' if has_pos else 'en efectivo'})."
+                f"[{mode_tag}] Pronóstico {r_pct:+.2f}%, régimen {laya1.regime}{reason_veto} "
+                f"(vol_20={prediction.vol_20:.4f}); espera ({'con posición' if has_pos else 'efectivo'})."
             )
 
+        bull, bear = self._default_bull_bear(prediction, laya1, news_context)
         return {
             "action": action,
             "symbol": prediction.symbol,
             "candle_date": prediction.candle_close_utc,
             "justification": just[:280],
+            "bull_case": bull,
+            "bear_case": bear,
         }
 
     def _build_orchestrator_feedback(
@@ -289,22 +353,39 @@ class QwenOrchestratorAgent:
         laya1: LayaAlphaOutput,
         portfolio: PortfolioState,
         decision_action: str,
+        decision: Optional[QwenDecisionOutput] = None,
+        is_fallback: bool = False,
     ) -> Dict[str, Any]:
-        """Genera retroalimentación estructurada de Qwen (orquestador) hacia Laya #1 y Laya #2."""
+        """
+        Extrae retroalimentación real generada por Qwen LLM cuando está presente y válida,
+        o usa reglas calibradas deterministas etiquetadas como `rule_fallback`.
+        """
         aligned = decision_action == laya1.signal_action
         high_vol = (laya1.regime == "high_vol_chop") or (prediction.vol_20 > 0.035)
         has_pos = portfolio.position_qty >= self.settings.min_lot_size
 
-        if not aligned:
+        llm_fb1 = (decision.feedback_to_laya1 if decision else None) or {}
+        llm_fb2 = (decision.feedback_to_laya2 if decision else None) or {}
+        used_llm_fb1 = (not is_fallback) and isinstance(llm_fb1, dict) and bool(llm_fb1.get("guidance"))
+        used_llm_fb2 = (not is_fallback) and isinstance(llm_fb2, dict) and bool(llm_fb2.get("focus_rule"))
+
+        if used_llm_fb1:
+            try:
+                temp_delta = float(max(-0.20, min(0.25, float(llm_fb1.get("temperature_delta", 0.0)))))
+            except (TypeError, ValueError):
+                temp_delta = 0.0
+            try:
+                conv_bias = float(max(-0.20, min(0.20, float(llm_fb1.get("conviction_bias", 0.0)))))
+            except (TypeError, ValueError):
+                conv_bias = 0.0
+            laya1_guidance = str(llm_fb1.get("guidance", "")).strip()[:220]
+        elif not aligned:
             temp_delta = 0.10
             conv_bias = -0.08
             laya1_guidance = (
                 f"Divergencia Qwen({decision_action}) vs Laya#1({laya1.signal_action}): "
                 f"suavizar temperatura (+0.10) y moderar sesgo de convicción (-0.08)."
             )
-            strictness = "strict"
-            min_coh = 0.88
-            focus_rule = "AUDITAR_DIVERGENCIA_SENAL"
         elif high_vol:
             temp_delta = 0.08
             conv_bias = -0.04
@@ -312,9 +393,6 @@ class QwenOrchestratorAgent:
                 f"Régimen volátil ({laya1.regime}, vol={prediction.vol_20:.4f}): "
                 f"elevar cautela en política DRL (+0.08 temp, -0.04 sesgo)."
             )
-            strictness = "strict"
-            min_coh = 0.88
-            focus_rule = "AUDITAR_CONTRA_VOLATILIDAD"
         elif decision_action in {"BUY", "SELL"}:
             temp_delta = -0.08
             conv_bias = 0.05
@@ -322,9 +400,6 @@ class QwenOrchestratorAgent:
                 f"Consenso DRL-Qwen ({decision_action} en {prediction.symbol}): "
                 f"refuerzo positivo (+0.05 sesgo, -0.08 temp)."
             )
-            strictness = "standard"
-            min_coh = 0.75
-            focus_rule = "VERIFICACION_ESTANDAR_LONG_ONLY"
         else:
             temp_delta = 0.0
             conv_bias = 0.0
@@ -332,12 +407,35 @@ class QwenOrchestratorAgent:
                 f"Consenso HOLD ({'con posición' if has_pos else 'sin posición'}): "
                 f"mantener calibración DRL nominal."
             )
+
+        if used_llm_fb2:
+            strictness = str(llm_fb2.get("strictness_level", "standard")).strip().lower()
+            if strictness not in {"standard", "strict"}:
+                strictness = "strict" if (not aligned or high_vol) else "standard"
+            try:
+                min_coh = float(
+                    max(0.55, min(0.95, float(llm_fb2.get("min_coherence_threshold", 0.75))))
+                )
+            except (TypeError, ValueError):
+                min_coh = 0.85 if strictness == "strict" else 0.75
+            focus_rule = str(llm_fb2.get("focus_rule", "VERIFICACION_LLM")).strip()[:80]
+        elif not aligned:
+            strictness = "strict"
+            min_coh = 0.88
+            focus_rule = "AUDITAR_DIVERGENCIA_SENAL"
+        elif high_vol:
+            strictness = "strict"
+            min_coh = 0.88
+            focus_rule = "AUDITAR_CONTRA_VOLATILIDAD"
+        else:
             strictness = "standard"
             min_coh = 0.75
             focus_rule = "VERIFICACION_ESTANDAR_LONG_ONLY"
 
+        fb_source = "llm_generated" if (used_llm_fb1 or used_llm_fb2) else "rule_fallback"
         return {
             "source_agent": "Qwen Orchestrator",
+            "feedback_source": fb_source,
             "symbol": prediction.symbol,
             "candle_date": prediction.candle_close_utc,
             "qwen_action": decision_action,
@@ -345,6 +443,7 @@ class QwenOrchestratorAgent:
             "aligned": aligned,
             "to_laya1": {
                 "target": "Laya #1 (DRL Local)",
+                "feedback_source": "llm_generated" if used_llm_fb1 else "rule_fallback",
                 "temperature_delta": round(temp_delta, 4),
                 "conviction_bias": round(conv_bias, 4),
                 "guidance": laya1_guidance,
@@ -354,6 +453,7 @@ class QwenOrchestratorAgent:
             },
             "to_laya2": {
                 "target": "Laya #2 (Guardia Local)",
+                "feedback_source": "llm_generated" if used_llm_fb2 else "rule_fallback",
                 "strictness_level": strictness,
                 "min_coherence_threshold": round(min_coh, 2),
                 "focus_rule": focus_rule,
@@ -379,11 +479,35 @@ class QwenOrchestratorAgent:
         transport: str,
         api_key_configured: bool,
         num_ctx: Optional[int] = None,
+        raw_llm_response: str = "",
+        prompt_summary: str = "",
+        news_context: Optional[Dict[str, Any]] = None,
+        episodic_memories: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
+        is_fallback = ("simulated" in transport) or ("fallback" in transport)
+        default_bull, default_bear = self._default_bull_bear(prediction, laya1, news_context)
+        bull_case = (decision.bull_case or "").strip() or default_bull
+        bear_case = (decision.bear_case or "").strip() or default_bear
+
+        fb = self._build_orchestrator_feedback(
+            prediction=prediction,
+            laya1=laya1,
+            portfolio=portfolio,
+            decision_action=decision.action,
+            decision=decision,
+            is_fallback=is_fallback,
+        )
+
         res: Dict[str, Any] = {
-            **decision.model_dump(),
+            "action": decision.action,
+            "symbol": decision.symbol,
+            "candle_date": decision.candle_date,
+            "justification": decision.justification,
+            "bull_case": bull_case,
+            "bear_case": bear_case,
             "execution_mode": execution_mode,
             "is_local_device": is_local_device,
+            "is_fallback": is_fallback,
             "api_endpoint": api_endpoint,
             "model": model,
             "vram_budget_gb": vram_budget_gb,
@@ -391,12 +515,11 @@ class QwenOrchestratorAgent:
             "latency_ms": round(latency_ms, 2),
             "transport": transport,
             "api_key_configured": api_key_configured,
-            "orchestrator_feedback": self._build_orchestrator_feedback(
-                prediction=prediction,
-                laya1=laya1,
-                portfolio=portfolio,
-                decision_action=decision.action,
-            ),
+            "orchestrator_feedback": fb,
+            "raw_llm_response": raw_llm_response[:1200],
+            "prompt_summary": prompt_summary[:1200],
+            "news_context": news_context or {},
+            "memories_used_count": len(episodic_memories or []),
         }
         if num_ctx is not None:
             res["num_ctx"] = num_ctx
@@ -410,11 +533,13 @@ class QwenOrchestratorAgent:
         gateway_key: str,
         strict_live: bool = False,
         qwen_mode_override: Optional[str] = None,
+        news_context: Optional[Dict[str, Any]] = None,
+        episodic_memories: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """
         Switch Dinámico System-2:
         - EXTERNAL_API: invoca Qwen 14B por API HTTP remota (no local).
-        - LOCAL_DEVICE: invoca Qwen 7B-Q4 (<= 6GB VRAM) vía Ollama local (/v1/chat/completions).
+        - LOCAL_DEVICE: invoca Qwen 2.5 3B (<= 6GB VRAM) vía Ollama local (/v1/chat/completions).
         """
         active_mode = (
             qwen_mode_override
@@ -431,9 +556,13 @@ class QwenOrchestratorAgent:
         )
 
         t0 = time.perf_counter()
+        messages = self._build_messages(
+            prediction, laya1, portfolio, news_context=news_context, episodic_memories=episodic_memories
+        )
+        prompt_summary = messages[1]["content"][:1200]
 
         # ======================================================================
-        # RAMA LOCAL <= 6 GB VRAM: Qwen 2.5 7B Instruct Q4_K_M en Ollama Local
+        # RAMA LOCAL <= 6 GB VRAM: Qwen 2.5 3B Real en Ollama Local
         # ======================================================================
         if active_mode == "LOCAL_DEVICE":
             local_endpoint = f"{self.settings.ollama_base_url.rstrip('/')}/v1/chat/completions"
@@ -451,9 +580,11 @@ class QwenOrchestratorAgent:
                     laya1,
                     portfolio,
                     mode_tag=f"Qwen Local 6GB ({local_model})",
+                    news_context=news_context,
                 )
+                raw_json_str = json.dumps(raw_obj, ensure_ascii=False)
                 decision = self._validate_decision_contract(
-                    json.dumps(raw_obj, ensure_ascii=False),
+                    raw_json_str,
                     expected_symbol=prediction.symbol,
                     expected_candle_date=prediction.candle_close_utc,
                 )
@@ -472,6 +603,10 @@ class QwenOrchestratorAgent:
                     latency_ms=latency_ms,
                     transport="ollama_local_6gb_simulated_fallback",
                     api_key_configured=False,
+                    raw_llm_response=raw_json_str,
+                    prompt_summary=prompt_summary,
+                    news_context=news_context,
+                    episodic_memories=episodic_memories,
                 )
 
             local_body = {
@@ -481,7 +616,7 @@ class QwenOrchestratorAgent:
                 "keep_alive": "24h",
                 "response_format": {"type": "json_object"},
                 "options": {"num_ctx": self.settings.qwen_local_num_ctx},
-                "messages": self._build_messages(prediction, laya1, portfolio),
+                "messages": messages,
             }
             owns_client = self.http_client is None
             client = self.http_client or httpx.Client(
@@ -495,16 +630,20 @@ class QwenOrchestratorAgent:
                 resp.raise_for_status()
                 self._last_local_unavailable_ts = None
                 payload = resp.json()
-                raw_content = payload["choices"][0]["message"]["content"]
-                if self.http_client is None:
-                    raw_content = self._normalize_local_json_content(
-                        raw_content=raw_content,
+                raw_llm = str(payload["choices"][0]["message"]["content"])
+                normalized_content = (
+                    self._normalize_local_json_content(
+                        raw_content=raw_llm,
                         prediction=prediction,
                         laya1=laya1,
                         portfolio=portfolio,
+                        news_context=news_context,
                     )
+                    if self.http_client is None
+                    else raw_llm
+                )
                 decision = self._validate_decision_contract(
-                    raw_content,
+                    normalized_content,
                     expected_symbol=prediction.symbol,
                     expected_candle_date=prediction.candle_close_utc,
                 )
@@ -523,6 +662,10 @@ class QwenOrchestratorAgent:
                     latency_ms=latency_ms,
                     transport="ollama_local_6gb_vram",
                     api_key_configured=True,
+                    raw_llm_response=raw_llm,
+                    prompt_summary=prompt_summary,
+                    news_context=news_context,
+                    episodic_memories=episodic_memories,
                 )
             except (httpx.HTTPError, httpx.TimeoutException, KeyError, IndexError, TypeError) as exc:
                 self._last_local_unavailable_ts = time.monotonic()
@@ -543,9 +686,11 @@ class QwenOrchestratorAgent:
                     laya1,
                     portfolio,
                     mode_tag=f"Qwen Local 6GB ({local_model})",
+                    news_context=news_context,
                 )
+                raw_json_str = json.dumps(raw_obj, ensure_ascii=False)
                 decision = self._validate_decision_contract(
-                    json.dumps(raw_obj, ensure_ascii=False),
+                    raw_json_str,
                     expected_symbol=prediction.symbol,
                     expected_candle_date=prediction.candle_close_utc,
                 )
@@ -564,6 +709,10 @@ class QwenOrchestratorAgent:
                     latency_ms=latency_ms,
                     transport="ollama_local_6gb_simulated_fallback",
                     api_key_configured=False,
+                    raw_llm_response=raw_json_str,
+                    prompt_summary=prompt_summary,
+                    news_context=news_context,
+                    episodic_memories=episodic_memories,
                 )
             finally:
                 if owns_client:
@@ -576,9 +725,12 @@ class QwenOrchestratorAgent:
         use_http = (self.http_client is not None) or self._has_real_api_key() or strict_live
 
         if not use_http:
-            raw_obj = self._dry_run_external_api_simulation(prediction, laya1, portfolio)
+            raw_obj = self._dry_run_external_api_simulation(
+                prediction, laya1, portfolio, news_context=news_context
+            )
+            raw_json_str = json.dumps(raw_obj, ensure_ascii=False)
             decision = self._validate_decision_contract(
-                json.dumps(raw_obj, ensure_ascii=False),
+                raw_json_str,
                 expected_symbol=prediction.symbol,
                 expected_candle_date=prediction.candle_close_utc,
             )
@@ -596,9 +748,12 @@ class QwenOrchestratorAgent:
                 latency_ms=latency_ms,
                 transport="external_api_simulated_no_key",
                 api_key_configured=False,
+                raw_llm_response=raw_json_str,
+                prompt_summary=prompt_summary,
+                news_context=news_context,
+                episodic_memories=episodic_memories,
             )
 
-        # Invocación HTTP real al endpoint externo de Qwen 14B (NO LOCAL)
         headers = {
             "Authorization": f"Bearer {self.settings.qwen_api_key}",
             "Content-Type": "application/json",
@@ -608,7 +763,7 @@ class QwenOrchestratorAgent:
             "temperature": self.settings.qwen_temperature,
             "max_tokens": self.settings.qwen_max_tokens,
             "response_format": {"type": "json_object"},
-            "messages": self._build_messages(prediction, laya1, portfolio),
+            "messages": messages,
         }
 
         owns_client = self.http_client is None
@@ -617,7 +772,7 @@ class QwenOrchestratorAgent:
             resp = client.post(endpoint_url, headers=headers, json=body)
             resp.raise_for_status()
             payload = resp.json()
-            raw_content = payload["choices"][0]["message"]["content"]
+            raw_content = str(payload["choices"][0]["message"]["content"])
         except (httpx.HTTPError, httpx.TimeoutException, KeyError, IndexError, TypeError) as exc:
             self.db.log_error(
                 error_code="QWEN_EXTERNAL_API_UNAVAILABLE",
@@ -652,4 +807,8 @@ class QwenOrchestratorAgent:
             latency_ms=latency_ms,
             transport="external_https_api",
             api_key_configured=self._has_real_api_key(),
+            raw_llm_response=raw_content,
+            prompt_summary=prompt_summary,
+            news_context=news_context,
+            episodic_memories=episodic_memories,
         )

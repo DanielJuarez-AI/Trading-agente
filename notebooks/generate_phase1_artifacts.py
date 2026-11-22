@@ -368,10 +368,10 @@ def run_phase1() -> None:
 
     universe = fetch_universe_history(PRIMARY_TICKERS, period="3y")
 
-    # Guardar cache de velas cerradas para Historical Replay (últimas 140 velas por ticker)
+    # Guardar cache de velas cerradas para Historical Replay (últimas 250 velas por ticker)
     replay_cache: Dict[str, List[Dict[str, Any]]] = {}
     for ticker, df in universe.items():
-        tail_df = df.tail(140).reset_index(drop=True)
+        tail_df = df.tail(250).reset_index(drop=True)
         replay_cache[ticker] = tail_df.to_dict(orient="records")
     (DATA_DIR / "replay_candles.json").write_text(
         json.dumps(replay_cache, indent=2), encoding="utf-8"

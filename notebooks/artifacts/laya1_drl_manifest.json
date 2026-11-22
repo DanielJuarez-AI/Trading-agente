@@ -1,8 +1,8 @@
 {
-  "model_version": "laya1_drl_v1",
-  "algorithm": "Dueling Double-DQN + Advantage Actor-Critic (A2C) + Regime Head",
+  "model_version": "laya1_drl_v2_multitf",
+  "algorithm": "Dueling Double-DQN + Advantage Actor-Critic (A2C) + Regime Head (Multi-TF ATR)",
   "weights_file": "laya1_drl_v1.pt",
-  "sha256": "949af2e58ab1085e1215d24c5d1ae6d2bf63d2ea139b40f7d466ca2567d81059",
+  "sha256": "984c33a20c2b1861c3e5b0318ebabe6a1f5006deca783b7c0c1139b516260d10",
   "architecture": {
     "class": "Laya1DRLPolicyNet",
     "state_dim": 10,
@@ -23,32 +23,34 @@
   "hyperparameters": {
     "gamma": 0.95,
     "tau": 0.05,
-    "lr": 0.0015,
+    "lr": 0.0012,
+    "weight_decay": 0.005,
+    "turnover_penalty": 0.0012,
     "seed": 42,
     "epochs_max": 45
   },
-  "calibration_temperature": 1.5,
+  "calibration_temperature": 1.0,
   "splits_sizes": {
-    "TR": 4560,
-    "VA": 900,
-    "TE": 900
+    "TR": 13320,
+    "VA": 2700,
+    "TE": 2700
   },
   "metrics": {
     "TR": {
-      "mean_step_return_bps": 5.1966,
-      "sharpe_step": 0.0233,
-      "regime_accuracy": 0.6691
+      "mean_step_return_bps": 13.7243,
+      "sharpe_step": 0.1177,
+      "regime_accuracy": 0.7929
     },
     "VA": {
-      "mean_step_return_bps": 11.4551,
-      "sharpe_step": 0.056,
-      "regime_accuracy": 0.6167
+      "mean_step_return_bps": 13.4362,
+      "sharpe_step": 0.1299,
+      "regime_accuracy": 0.8122
     },
     "TE": {
-      "mean_step_return_bps": -15.0502,
-      "sharpe_step": -0.0529,
-      "regime_accuracy": 0.5944
+      "mean_step_return_bps": -15.9236,
+      "sharpe_step": -0.1063,
+      "regime_accuracy": 0.6737
     }
   },
-  "generated_at_utc": "2026-11-22T02:49:39Z"
+  "generated_at_utc": "2026-11-22T05:51:25Z"
 }

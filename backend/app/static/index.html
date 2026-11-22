@@ -18,9 +18,10 @@
     <!-- Header -->
     <header class="flex flex-wrap items-center justify-between gap-4 border-b border-gray-800 pb-4">
       <div>
-        <h1 class="text-2xl font-bold tracking-tight text-white flex items-center gap-3">
+        <h1 class="text-2xl font-bold tracking-tight text-white flex items-center gap-3 flex-wrap">
           <span class="inline-block w-3 h-3 rounded-full bg-emerald-500 animate-pulse"></span>
-          Quant Multi-Agent Trader • Dashboard
+          <span>Quant Multi-Agent Trader • Dashboard</span>
+          <span id="header-version-badge" class="px-2.5 py-0.5 rounded-full text-xs font-mono font-semibold bg-fuchsia-500/20 text-fuchsia-300 border border-fuchsia-500/40" title="Entrega V.0.1 • Versión derivada de la cantidad de commits en Git">v0.1.10</span>
         </h1>
         <p class="text-xs text-gray-400 mt-1">
           Front Office (LSTM T4 + Dual Laya Local) ➔ Middle Office (Risk Hard Gate) ➔ Back Office (Paper + SQLite WAL)
@@ -31,7 +32,7 @@
           Estado: RUNNING
         </span>
         <span id="header-tf-badge" class="px-3 py-1 rounded-full text-xs font-semibold bg-indigo-500/20 text-indigo-300 border border-indigo-500/40">
-          Temporalidad: Día (1d)
+          Trading Activo: Diario (1D • 200D)
         </span>
         <span id="header-laya-badge" class="px-3 py-1 rounded-full text-xs font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
           Laya #1: DRL Dueling A2C
@@ -65,13 +66,13 @@
             <option value="replay">Historical Replay</option>
             <option value="live">Live Market (MEXC)</option>
           </select>
-          <div class="flex rounded-lg border border-gray-700 overflow-hidden" title="Temporalidad de operación del agente y gráfica">
-            <button id="btn-tf-1h" type="button" onclick="switchTimeframe('1h')" class="px-3 py-1.5 text-xs font-semibold bg-gray-950 text-gray-400 hover:text-white transition">Hora (1h)</button>
-            <button id="btn-tf-1d" type="button" onclick="switchTimeframe('1d')" class="px-3 py-1.5 text-xs font-semibold bg-indigo-600 text-white transition">Día (1d)</button>
+          <div class="flex rounded-lg border border-gray-700 overflow-hidden" title="Temporalidad de operación del agente (Trading por Horas 1h / Diario 1d) y gráfica de 200 velas">
+            <button id="btn-tf-1h" type="button" onclick="switchTimeframe('1h')" class="px-3 py-1.5 text-xs font-semibold bg-gray-950 text-gray-400 hover:text-white transition">⏱️ Trading 1H (Horas)</button>
+            <button id="btn-tf-1d" type="button" onclick="switchTimeframe('1d')" class="px-3 py-1.5 text-xs font-semibold bg-indigo-600 text-white transition">📅 Trading 1D (Días)</button>
           </div>
-          <div class="flex rounded-lg border border-sky-700/60 overflow-hidden" title="Cambiar Qwen entre API Externa (14B) y Local 6GB VRAM (7B-Q4)">
+          <div class="flex rounded-lg border border-sky-700/60 overflow-hidden" title="Cambiar Qwen entre API Externa (14B) y Local 6GB VRAM (3B-Q4)">
             <button id="btn-qwen-api" type="button" onclick="switchQwenMode('EXTERNAL_API')" class="px-3 py-1.5 text-xs font-semibold bg-sky-600 text-white transition">☁️ Qwen API (14B)</button>
-            <button id="btn-qwen-local" type="button" onclick="switchQwenMode('LOCAL_DEVICE')" class="px-3 py-1.5 text-xs font-semibold bg-gray-950 text-gray-400 hover:text-white transition">💻 Local 6GB (7B-Q4)</button>
+            <button id="btn-qwen-local" type="button" onclick="switchQwenMode('LOCAL_DEVICE')" class="px-3 py-1.5 text-xs font-semibold bg-gray-950 text-gray-400 hover:text-white transition">💻 Local 6GB (3B-Q4)</button>
           </div>
         </div>
       </div>
@@ -85,13 +86,13 @@
         </div>
 
         <div class="flex flex-wrap items-center gap-2">
-          <button onclick="controlAction('step')" class="bg-sky-600 hover:bg-sky-500 text-white text-xs font-semibold px-4 py-2 rounded-lg transition flex items-center gap-1">
-            <span>⚡</span> Ejecutar 1 Ciclo
+          <button onclick="controlAction('step', { interval: currentInterval })" class="bg-sky-600 hover:bg-sky-500 text-white text-xs font-semibold px-4 py-2 rounded-lg transition flex items-center gap-1">
+            <span>⚡</span> Ejecutar 1 Ciclo (<span id="btn-step-tf">1D</span>)
           </button>
           <button onclick="runReplayBatch(25)" class="bg-violet-600 hover:bg-violet-500 text-white text-xs font-semibold px-4 py-2 rounded-lg transition flex items-center gap-1">
-            <span>🔄</span> Replay 25 Ciclos
+            <span>🔄</span> Replay 25 Ciclos (<span id="btn-replay-tf">1D</span>)
           </button>
-          <button onclick="loadBenchmark()" class="bg-gray-800 hover:bg-gray-700 text-gray-200 border border-gray-700 text-xs font-semibold px-4 py-2 rounded-lg transition">
+          <button onclick="runBenchmarkAction()" class="bg-gray-800 hover:bg-gray-700 text-gray-200 border border-gray-700 text-xs font-semibold px-4 py-2 rounded-lg transition">
             Benchmark 3 Carriles
           </button>
         </div>
@@ -141,12 +142,10 @@
             <button id="btn-type-line" type="button" onclick="setChartType('line')" class="px-2.5 py-1 font-medium bg-gray-950 text-gray-400 hover:text-white">Línea</button>
           </div>
 
-          <!-- Rango Temporal Adaptativo (1h / 1d + Ventana 1D) -->
-          <div class="flex rounded-lg border border-gray-700 overflow-hidden">
-            <button id="btn-range-0" type="button" onclick="setChartRangeIdx(0)" class="px-2.5 py-1 font-medium bg-gray-950 text-gray-400 hover:text-white">1D</button>
-            <button id="btn-range-1" type="button" onclick="setChartRangeIdx(1)" class="px-2.5 py-1 font-medium bg-gray-950 text-gray-400 hover:text-white">30D</button>
-            <button id="btn-range-2" type="button" onclick="setChartRangeIdx(2)" class="px-2.5 py-1 font-medium bg-gray-950 text-gray-400 hover:text-white">60D</button>
-            <button id="btn-range-3" type="button" onclick="setChartRangeIdx(3)" class="px-2.5 py-1 font-medium bg-sky-600 text-white">140D</button>
+          <!-- Ventana de Trading & Velas (Única ventana de 200 velas: 200 Días 1D o 200 Horas 1H) -->
+          <div class="flex rounded-lg border border-indigo-500/40 overflow-hidden" title="Ventana unificada de 200 velas y ejecución de trading por días (1D) u horas (1H)">
+            <button id="btn-chart-tf-1d" type="button" onclick="switchTimeframe('1d')" class="px-2.5 py-1 font-medium bg-indigo-600 text-white transition">📅 Últimos 200 Días (1D)</button>
+            <button id="btn-chart-tf-1h" type="button" onclick="switchTimeframe('1h')" class="px-2.5 py-1 font-medium bg-gray-950 text-gray-400 hover:text-white transition">⏱️ Ventana por Horas • 200H (1H)</button>
           </div>
 
           <!-- Capas -->
@@ -155,6 +154,9 @@
           </label>
           <label class="flex items-center gap-1 cursor-pointer text-sky-300">
             <input type="checkbox" id="chk-ema20" checked onchange="renderChartFromState()" class="accent-sky-400"> EMA 20
+          </label>
+          <label class="flex items-center gap-1 cursor-pointer text-purple-300">
+            <input type="checkbox" id="chk-rsi" checked onchange="renderChartFromState()" class="accent-purple-400"> RSI (14)
           </label>
           <label class="flex items-center gap-1 cursor-pointer text-gray-300">
             <input type="checkbox" id="chk-volume" checked onchange="renderChartFromState()" class="accent-gray-400"> Volumen
@@ -166,20 +168,38 @@
       </div>
 
       <div id="chart-ohlc-legend" class="text-[11px] font-mono text-gray-400 flex flex-wrap gap-4">
-        <span>Mueve el cursor sobre la gráfica para inspeccionar OHLCV, EMA 10 y EMA 20</span>
+        <span>Mueve el cursor sobre la gráfica para inspeccionar OHLCV, EMA 10, EMA 20 y RSI(14)</span>
       </div>
 
       <div class="grid grid-cols-1 lg:grid-cols-12 gap-4 items-stretch">
-        <!-- Columna Izquierda: Gráfica con Pronóstico de Fondo -->
-        <div class="lg:col-span-9 relative rounded-lg border border-gray-800 bg-gray-950/95 overflow-hidden" style="height: 390px;">
-          <div id="chart-forecast-backdrop" class="pointer-events-none absolute inset-0 flex items-center justify-center transition-all duration-500">
-            <div id="chart-forecast-watermark" class="hidden"></div>
+        <!-- Columna Izquierda: Gráfica 200 Velas + Sub-gráfica RSI (14) -->
+        <div class="lg:col-span-9 flex flex-col gap-2.5">
+          <div class="relative rounded-lg border border-gray-800 bg-gray-950/95 overflow-hidden" style="height: 340px;">
+            <div id="chart-forecast-backdrop" class="pointer-events-none absolute inset-0 flex items-center justify-center transition-all duration-500">
+              <div id="chart-forecast-watermark" class="hidden"></div>
+            </div>
+            <div id="ticker-chart-container" class="relative z-10 w-full h-full"></div>
           </div>
-          <div id="ticker-chart-container" class="relative z-10 w-full h-full"></div>
+
+          <!-- Sub-gráfica Relative Strength Index (RSI-14 Wilder) -->
+          <div id="rsi-chart-wrapper" class="rounded-lg border border-gray-800 bg-gray-950/95 overflow-hidden p-2.5">
+            <div class="flex flex-wrap items-center justify-between gap-2 pb-1.5 mb-1 border-b border-gray-800/80">
+              <div class="flex items-center gap-2">
+                <span class="text-[11px] font-bold uppercase tracking-wider text-purple-300">Relative Strength Index • RSI (14)</span>
+                <span class="text-[10px] text-gray-500 font-mono">Sobrecompra ≥ 70 | Sobreventa ≤ 30</span>
+              </div>
+              <div class="flex items-center gap-2">
+                <span id="rsi-current-val" class="font-mono text-xs font-bold text-purple-300">--</span>
+                <span id="rsi-zone-pill" class="px-2 py-0.5 rounded text-[10px] font-bold bg-gray-800 text-gray-300">NEUTRAL (30–70)</span>
+                <span id="rsi-forecast-val" class="text-[11px] font-mono text-gray-400">t+1: --</span>
+              </div>
+            </div>
+            <div id="rsi-chart-container" class="w-full" style="height: 112px;"></div>
+          </div>
         </div>
 
         <!-- Columna Derecha: Barras Horizontales de Pronóstico y Confianza del Agente -->
-        <aside id="confidence-bars-panel" class="lg:col-span-3 rounded-lg border border-gray-800 bg-gray-950/90 p-3.5 flex flex-col justify-between space-y-3 overflow-y-auto" style="max-height: 390px;">
+        <aside id="confidence-bars-panel" class="lg:col-span-3 rounded-lg border border-gray-800 bg-gray-950/90 p-3.5 flex flex-col justify-between space-y-3 overflow-y-auto" style="max-height: 500px;">
           <div class="space-y-2.5">
             <div class="flex items-center justify-between border-b border-gray-800 pb-2">
               <h4 class="text-xs font-bold uppercase tracking-wider text-gray-200">Pronóstico & Confianza</h4>
@@ -351,6 +371,7 @@
             <tr>
               <th class="py-2">Fecha Vela UTC</th>
               <th class="py-2">Ticker</th>
+              <th class="py-2">TF</th>
               <th class="py-2">Modo</th>
               <th class="py-2">r_hat (T4)</th>
               <th class="py-2">Laya #1</th>
@@ -366,15 +387,17 @@
       </div>
     </section>
 
-    <!-- Mapa Estelar de Constelaciones: Paso de la Información -->
+    <!-- Mapa Estelar de Constelaciones Dinámico: Paso en Vivo de la Información -->
     <section id="star-constellation-section" class="rounded-xl border border-indigo-500/30 bg-gray-950 p-5 shadow-2xl space-y-3">
       <div class="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h3 class="text-sm font-bold text-indigo-200 uppercase tracking-wider flex items-center gap-2">
-            <span>✦</span> Mapa de Constelaciones • Paso en Vivo de la Información
+            <span class="animate-spin inline-block" style="animation-duration: 9s;">✦</span>
+            Mapa de Constelaciones Dinámico • Paso en Vivo (SSE)
+            <span id="badge-sse-status" class="px-2 py-0.5 rounded-full text-[10px] font-mono bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">SSE: CONECTANDO</span>
           </h3>
           <p class="text-xs text-gray-400 mt-0.5">
-            Cada estrella representa un módulo/agente y los cometas de luz muestran la ruta exacta del mensaje y verificación en cada ciclo (<span id="star-tf-indicator" class="text-indigo-300 font-semibold">1d</span>).
+            Arrastra cualquier estrella para reorganizarla, observa órbitas, ondas de choque por evento real y ráfagas de plasma en el ciclo (<span id="star-tf-indicator" class="text-indigo-300 font-semibold">Día (1d)</span>).
           </p>
         </div>
         <div class="flex flex-wrap items-center gap-2">
@@ -382,27 +405,41 @@
           <span id="badge-fb-ms" class="px-2 py-1 rounded bg-gray-900 border border-amber-500/30 text-[11px] font-mono text-amber-300">Feedback Qwen: -- ms</span>
           <span id="badge-sync-ms" class="px-2 py-1 rounded bg-gray-900 border border-sky-500/30 text-[11px] font-mono text-sky-300">Sync API: -- ms</span>
           <span id="badge-render-ms" class="px-2 py-1 rounded bg-gray-900 border border-emerald-500/30 text-[11px] font-mono text-emerald-300">Render Mapa: -- ms</span>
-          <button type="button" onclick="triggerStarPulse(false)" class="rounded-lg border border-indigo-500/40 bg-indigo-500/20 px-3 py-1.5 text-xs font-semibold text-indigo-200 hover:bg-indigo-500/30 transition">
-            ✨ Lanzar Pulso de Información
+          <button id="btn-star-speed" type="button" onclick="cycleStarSpeed()" class="rounded-lg border border-sky-500/40 bg-sky-500/15 px-2.5 py-1.5 text-xs font-semibold text-sky-200 hover:bg-sky-500/25 transition">
+            ⚡ Velocidad: 1x
+          </button>
+          <button id="btn-star-dynamic" type="button" onclick="toggleStarDynamic()" class="rounded-lg border border-emerald-500/40 bg-emerald-500/15 px-2.5 py-1.5 text-xs font-semibold text-emerald-200 hover:bg-emerald-500/25 transition">
+            🌀 Órbita & Partículas: ON
+          </button>
+          <button type="button" onclick="resetStarPositions()" class="rounded-lg border border-gray-700 bg-gray-900 px-2.5 py-1.5 text-xs font-semibold text-gray-300 hover:text-white transition">
+            ↺ Reset
+          </button>
+          <button type="button" onclick="triggerStarBurst()" class="rounded-lg border border-indigo-500/40 bg-indigo-500/20 px-3 py-1.5 text-xs font-semibold text-indigo-200 hover:bg-indigo-500/30 transition">
+            ✨ Lanzar Ráfaga
           </button>
         </div>
       </div>
 
-      <div class="relative rounded-xl border border-indigo-950/80 overflow-hidden bg-[#020410]" style="height: 440px;">
-        <canvas id="star-constellation-canvas" class="w-full h-full cursor-pointer block"></canvas>
+      <div class="relative rounded-xl border border-indigo-950/80 overflow-hidden bg-[#020410]" style="height: 460px;">
+        <canvas id="star-constellation-canvas" class="w-full h-full cursor-grab active:cursor-grabbing block"></canvas>
       </div>
 
       <!-- Barra HUD Interactiva de Estrella Seleccionada -->
       <div id="star-hud" class="rounded-lg border border-indigo-500/20 bg-gray-900/70 px-4 py-2.5 text-xs flex flex-wrap items-center justify-between gap-3">
         <div class="flex items-center gap-2">
           <span id="star-hud-badge" class="px-2 py-0.5 rounded bg-indigo-500/20 text-indigo-300 font-mono text-[10px]">ESTACIÓN ESTELAR</span>
-          <span id="star-hud-title" class="font-bold text-white">Haz clic o pasa el cursor sobre cualquier estrella</span>
+          <span id="star-hud-title" class="font-bold text-white">Haz clic o arrastra cualquier estrella</span>
         </div>
         <span id="star-hud-detail" class="text-gray-300 font-mono text-[11px]">
-          Observa el paso de datos: Mercado Público ➔ Ingesta ➔ LSTM T4 ➔ Laya #1 ➔ Gateway ➔ Qwen 14B ➔ Laya #2 ➔ Risk Gate & Paper
+          Flujo vivo: Mercado Público ➔ Ingesta ➔ Noticias & FinMem / Quant v2 + LSTM T4 ➔ Laya #1 ➔ Gateway ➔ Qwen ➔ Laya #2 ➔ Risk Gate
         </span>
       </div>
     </section>
+
+    <footer class="border-t border-gray-800/80 pt-4 pb-2 flex flex-wrap items-center justify-between gap-2 text-xs text-gray-500">
+      <span>Quant Multi-Agent Trader • <span id="footer-version" class="font-mono font-semibold text-fuchsia-300">v0.1.10</span> • Entrega V.0.1 • GitHub Público</span>
+      <span class="font-mono text-[11px] text-gray-600">Python FastAPI • PyTorch • XGBoost • Ollama • SQLite WAL • LightweightCharts</span>
+    </footer>
 
   </div>
 
@@ -417,29 +454,14 @@
     let initialSyncDone = false;
     let currentInterval = '1d';
     let currentQwenMode = 'EXTERNAL_API';
-    let currentRangeIdx = 3;
     let currentChartType = 'candles';
-    let currentChartLimit = 140;
+    const currentChartLimit = 200;
     let latestChartPayload = null;
     let latestStatusData = null;
     let latestDecisionData = null;
     let lwChart = null;
+    let lwRsiChart = null;
     let lwResizeObserver = null;
-
-    const RANGE_PRESETS = {
-      '1h': [
-        { limit: 24, label: '1D (24H)', fetchInterval: '1h' },
-        { limit: 72, label: '3D (72H)', fetchInterval: '1h' },
-        { limit: 168, label: '7D (168H)', fetchInterval: '1h' },
-        { limit: 240, label: '10D (240H)', fetchInterval: '1h' },
-      ],
-      '1d': [
-        { limit: 24, label: '1D', fetchInterval: '1h' },
-        { limit: 30, label: '30D', fetchInterval: '1d' },
-        { limit: 60, label: '60D', fetchInterval: '1d' },
-        { limit: 140, label: '140D', fetchInterval: '1d' },
-      ],
-    };
 
     // Initialize select options
     const tickerSelect = document.getElementById('ticker-select');
@@ -470,30 +492,36 @@
       setTimeout(() => el.classList.add('hidden'), 4000);
     }
 
-    function updateTimeframeAndRangeUI() {
+    function updateTimeframeUI() {
       const is1h = currentInterval === '1h';
-      document.getElementById('btn-tf-1h').className = `px-3 py-1.5 text-xs font-semibold transition ${is1h ? 'bg-indigo-600 text-white' : 'bg-gray-950 text-gray-400 hover:text-white'}`;
-      document.getElementById('btn-tf-1d').className = `px-3 py-1.5 text-xs font-semibold transition ${!is1h ? 'bg-indigo-600 text-white' : 'bg-gray-950 text-gray-400 hover:text-white'}`;
-      document.getElementById('header-tf-badge').textContent = is1h ? 'Temporalidad: Hora (1h)' : 'Temporalidad: Día (1d)';
+      const btnTf1h = document.getElementById('btn-tf-1h');
+      const btnTf1d = document.getElementById('btn-tf-1d');
+      if (btnTf1h) btnTf1h.className = `px-3 py-1.5 text-xs font-semibold transition ${is1h ? 'bg-indigo-600 text-white' : 'bg-gray-950 text-gray-400 hover:text-white'}`;
+      if (btnTf1d) btnTf1d.className = `px-3 py-1.5 text-xs font-semibold transition ${!is1h ? 'bg-indigo-600 text-white' : 'bg-gray-950 text-gray-400 hover:text-white'}`;
+
+      const btnChart1h = document.getElementById('btn-chart-tf-1h');
+      const btnChart1d = document.getElementById('btn-chart-tf-1d');
+      if (btnChart1d) btnChart1d.className = `px-2.5 py-1 font-medium transition ${!is1h ? 'bg-indigo-600 text-white' : 'bg-gray-950 text-gray-400 hover:text-white'}`;
+      if (btnChart1h) btnChart1h.className = `px-2.5 py-1 font-medium transition ${is1h ? 'bg-indigo-600 text-white' : 'bg-gray-950 text-gray-400 hover:text-white'}`;
+
+      document.getElementById('header-tf-badge').textContent = is1h
+        ? 'Trading Activo: Cada 1 Hora (1H • 200H)'
+        : 'Trading Activo: Diario (1D • 200D)';
+
+      const stepLbl = document.getElementById('btn-step-tf');
+      const repLbl = document.getElementById('btn-replay-tf');
+      if (stepLbl) stepLbl.textContent = is1h ? '1H' : '1D';
+      if (repLbl) repLbl.textContent = is1h ? '1H' : '1D';
+
       const starTf = document.getElementById('star-tf-indicator');
       if (starTf) starTf.textContent = is1h ? 'Hora (1h)' : 'Día (1d)';
-
-      const presets = RANGE_PRESETS[currentInterval] || RANGE_PRESETS['1d'];
-      if (currentRangeIdx >= presets.length || currentRangeIdx < 0) currentRangeIdx = presets.length - 1;
-      currentChartLimit = presets[currentRangeIdx].limit;
-      presets.forEach((p, idx) => {
-        const btn = document.getElementById(`btn-range-${idx}`);
-        if (!btn) return;
-        btn.textContent = p.label;
-        btn.className = `px-2.5 py-1 font-medium ${idx === currentRangeIdx ? 'bg-sky-600 text-white' : 'bg-gray-950 text-gray-400 hover:text-white'}`;
-      });
     }
 
     async function switchTimeframe(tf) {
-      currentInterval = tf;
-      updateTimeframeAndRangeUI();
+      currentInterval = tf === '1h' ? '1h' : '1d';
+      updateTimeframeUI();
       await loadTickerChart(tickerSelect.value);
-      await controlAction('switch_interval', { interval: tf });
+      await controlAction('switch_interval', { interval: currentInterval });
     }
 
     function updateQwenModeUI(mode) {
@@ -501,26 +529,31 @@
       const isLocal = currentQwenMode === 'LOCAL_DEVICE';
       document.getElementById('btn-qwen-api').className = `px-3 py-1.5 text-xs font-semibold transition ${!isLocal ? 'bg-sky-600 text-white' : 'bg-gray-950 text-gray-400 hover:text-white'}`;
       document.getElementById('btn-qwen-local').className = `px-3 py-1.5 text-xs font-semibold transition ${isLocal ? 'bg-violet-600 text-white' : 'bg-gray-950 text-gray-400 hover:text-white'}`;
-      document.getElementById('header-qwen-badge').textContent = isLocal ? 'Qwen: LOCAL 6GB (7B-Q4)' : 'Qwen: API EXTERNA (14B)';
+      document.getElementById('header-qwen-badge').textContent = isLocal ? 'Qwen: LOCAL 6GB (3B-Q4)' : 'Qwen: API EXTERNA (14B)';
       document.getElementById('header-qwen-badge').className = `px-3 py-1 rounded-full text-xs font-semibold ${isLocal ? 'bg-violet-500/20 text-violet-300 border border-violet-500/40' : 'bg-sky-500/20 text-sky-300 border border-sky-500/40'}`;
 
       const qBadge = document.getElementById('node-qwen-badge');
       const qTitle = document.getElementById('node-qwen-title');
       if (qBadge) {
-        qBadge.textContent = isLocal ? 'LOCAL 6GB (7B-Q4)' : 'API EXTERNA (14B)';
+        qBadge.textContent = isLocal ? 'LOCAL 6GB (3B-Q4)' : 'API EXTERNA (14B)';
         qBadge.className = `text-[10px] px-1.5 py-0.5 rounded font-mono ${isLocal ? 'bg-violet-500/20 text-violet-300' : 'bg-sky-500/20 text-sky-300'}`;
       }
       if (qTitle) {
-        qTitle.textContent = isLocal ? '2. Qwen 7B-Q4 (Local 6GB)' : '2. Qwen 14B (API Externa)';
+        qTitle.textContent = isLocal ? '2. Qwen 3B-Quant (Local 6GB)' : '2. Qwen 14B (API Externa)';
       }
 
-      // Actualizar estrellas en mapa de constelaciones
-      if (typeof STAR_NODES !== 'undefined' && STAR_NODES[5]) {
-        STAR_NODES[3].name = 'Laya #1 (DRL Local)';
-        STAR_NODES[3].tag = 'DRL DUELING A2C';
-        STAR_NODES[5].name = isLocal ? 'Qwen 7B-Q4 (Local 6GB)' : 'Qwen 14B (API Ext.)';
-        STAR_NODES[5].tag = isLocal ? 'LOCAL 6GB VRAM' : 'API EXTERNA';
-        STAR_NODES[5].color = isLocal ? '#c084fc' : '#38bdf8';
+      if (typeof STAR_NODES !== 'undefined') {
+        const layaNode = STAR_NODES.find(n => n.id === 'laya1');
+        const qwenNode = STAR_NODES.find(n => n.id === 'qwen');
+        if (layaNode) {
+          layaNode.name = 'Laya #1 (DRL Local)';
+          layaNode.tag = 'DRL DUELING A2C';
+        }
+        if (qwenNode) {
+          qwenNode.name = isLocal ? 'Qwen 3B-Q4 (Local 6GB)' : 'Qwen 14B (API Ext.)';
+          qwenNode.tag = isLocal ? 'LOCAL 6GB VRAM' : 'API EXTERNA';
+          qwenNode.color = isLocal ? '#c084fc' : '#38bdf8';
+        }
       }
     }
 
@@ -536,10 +569,37 @@
       renderChartFromState();
     }
 
-    function setChartRangeIdx(idx) {
-      currentRangeIdx = idx;
-      updateTimeframeAndRangeUI();
-      loadTickerChart(tickerSelect.value);
+    function updateRsiHeader(rsiValue, af) {
+      const val = Number(rsiValue ?? 50);
+      const valEl = document.getElementById('rsi-current-val');
+      const pillEl = document.getElementById('rsi-zone-pill');
+      const fcEl = document.getElementById('rsi-forecast-val');
+      if (valEl) {
+        valEl.textContent = `RSI: ${val.toFixed(2)}`;
+        valEl.className = `font-mono text-xs font-bold ${
+          val >= 70 ? 'text-rose-400' : (val <= 30 ? 'text-emerald-400' : 'text-purple-300')
+        }`;
+      }
+      if (pillEl) {
+        if (val >= 70) {
+          pillEl.textContent = 'SOBRECOMPRA (≥ 70)';
+          pillEl.className = 'px-2 py-0.5 rounded text-[10px] font-bold bg-rose-500/20 text-rose-300 border border-rose-500/40';
+        } else if (val <= 30) {
+          pillEl.textContent = 'SOBREVENTA (≤ 30)';
+          pillEl.className = 'px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40';
+        } else {
+          pillEl.textContent = 'NEUTRAL (30–70)';
+          pillEl.className = 'px-2 py-0.5 rounded text-[10px] font-bold bg-purple-500/15 text-purple-300 border border-purple-500/30';
+        }
+      }
+      if (fcEl) {
+        if (af && af.projected_rsi_t1 !== undefined) {
+          const hLbl = af.horizon_label || (currentInterval === '1h' ? '+1H' : '+1D');
+          fcEl.textContent = `t+1: ${Number(af.projected_rsi_t1).toFixed(2)} (${hLbl})`;
+        } else {
+          fcEl.textContent = 't+1: --';
+        }
+      }
     }
 
     function updateOhlcLegend(candle) {
@@ -547,6 +607,7 @@
       if (!candle) return;
       const isUp = candle.close >= candle.open;
       const col = isUp ? 'text-emerald-400' : 'text-rose-400';
+      const rsiVal = candle.rsi_14 !== undefined ? Number(candle.rsi_14).toFixed(2) : '--';
       leg.innerHTML = `
         <span class="text-gray-300">${candle.label || candle.time}</span>
         <span>O: <strong class="${col}">${Number(candle.open).toLocaleString()}</strong></span>
@@ -556,14 +617,75 @@
         <span>Vol: <strong class="text-gray-300">${Number(candle.volume).toLocaleString()}</strong></span>
         <span class="text-amber-300">EMA10: ${Number(candle.ema10).toLocaleString()}</span>
         <span class="text-sky-300">EMA20: ${Number(candle.ema20).toLocaleString()}</span>
+        <span class="text-purple-300">RSI(14): <strong>${rsiVal}</strong></span>
       `;
     }
 
-    function renderCanvasFallback(container, payload, showEma10, showEma20, showForecast) {
+    function renderRsiCanvasFallback(candles, af, showForecast) {
+      const rsiContainer = document.getElementById('rsi-chart-container');
+      if (!rsiContainer || !candles.length) return;
+      rsiContainer.innerHTML = '';
+      const canvas = document.createElement('canvas');
+      canvas.width = rsiContainer.clientWidth || 900;
+      canvas.height = 112;
+      rsiContainer.appendChild(canvas);
+      const ctx = canvas.getContext('2d');
+      const pad = { top: 8, right: 54, bottom: 14, left: 16 };
+      const w = canvas.width - pad.left - pad.right;
+      const h = canvas.height - pad.top - pad.bottom;
+      const totalSteps = (showForecast && af && af.projected_rsi_t1 !== undefined) ? candles.length + 1 : candles.length;
+      const toX = i => pad.left + (totalSteps > 1 ? (i / (totalSteps - 1)) * w : w / 2);
+      const toY = v => pad.top + h - (Math.max(0, Math.min(100, v)) / 100) * h;
+
+      // Líneas 70 / 50 / 30
+      [[70, 'rgba(244,63,94,0.55)'], [50, 'rgba(100,116,139,0.45)'], [30, 'rgba(16,185,129,0.55)']].forEach(([lvl, col]) => {
+        const y = toY(lvl);
+        ctx.save();
+        ctx.setLineDash([4, 4]);
+        ctx.strokeStyle = col;
+        ctx.beginPath();
+        ctx.moveTo(pad.left, y);
+        ctx.lineTo(canvas.width - pad.right, y);
+        ctx.stroke();
+        ctx.restore();
+        ctx.fillStyle = '#9ca3af';
+        ctx.font = '10px monospace';
+        ctx.fillText(String(lvl), canvas.width - pad.right + 6, y + 3);
+      });
+
+      // Curva RSI-14
+      ctx.strokeStyle = '#a855f7';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      candles.forEach((c, i) => {
+        const x = toX(i);
+        const y = toY(Number(c.rsi_14 ?? 50));
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+
+      if (showForecast && af && af.projected_rsi_t1 !== undefined) {
+        const lastX = toX(candles.length - 1);
+        const lastY = toY(Number(candles[candles.length - 1].rsi_14 ?? 50));
+        const nextX = toX(candles.length);
+        const nextY = toY(Number(af.projected_rsi_t1));
+        ctx.save();
+        ctx.setLineDash([4, 3]);
+        ctx.strokeStyle = '#c084fc';
+        ctx.lineWidth = 1.8;
+        ctx.beginPath();
+        ctx.moveTo(lastX, lastY);
+        ctx.lineTo(nextX, nextY);
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+
+    function renderCanvasFallback(container, payload, showEma10, showEma20, showForecast, showRsi) {
       container.innerHTML = '';
       const canvas = document.createElement('canvas');
       canvas.width = container.clientWidth || 900;
-      canvas.height = 390;
+      canvas.height = 340;
       container.appendChild(canvas);
       const ctx = canvas.getContext('2d');
       const candles = payload.candles || [];
@@ -677,6 +799,10 @@
         ctx.strokeRect(x1 - fcW / 2, bodyTop, fcW, bodyH);
         ctx.restore();
       }
+
+      if (showRsi) {
+        renderRsiCanvasFallback(candles, payload.agent_forecast, showForecast);
+      }
     }
 
     function renderHorizontalBarRow(label, pct, colorClass) {
@@ -775,15 +901,25 @@
     function renderChartFromState() {
       if (!latestChartPayload) return;
       const container = document.getElementById('ticker-chart-container');
+      const rsiWrapper = document.getElementById('rsi-chart-wrapper');
+      const rsiContainer = document.getElementById('rsi-chart-container');
       const candles = latestChartPayload.candles || [];
       if (!candles.length) return;
 
       const showEma10 = document.getElementById('chk-ema10').checked;
       const showEma20 = document.getElementById('chk-ema20').checked;
+      const showRsi = document.getElementById('chk-rsi') ? document.getElementById('chk-rsi').checked : true;
       const showVol = document.getElementById('chk-volume').checked;
       const showForecast = document.getElementById('chk-forecast').checked;
+      const af = latestChartPayload.agent_forecast;
+      const lastCandle = candles[candles.length - 1];
 
-      updateOhlcLegend(candles[candles.length - 1]);
+      if (rsiWrapper) {
+        rsiWrapper.style.display = showRsi ? 'block' : 'none';
+      }
+
+      updateOhlcLegend(lastCandle);
+      updateRsiHeader(lastCandle?.rsi_14 ?? latestChartPayload.last_rsi_14 ?? 50, af);
       updateForecastAndConfidencePanel(latestChartPayload);
 
       if (lwResizeObserver) {
@@ -794,16 +930,21 @@
         lwChart.remove();
         lwChart = null;
       }
+      if (lwRsiChart) {
+        lwRsiChart.remove();
+        lwRsiChart = null;
+      }
 
       if (typeof window.LightweightCharts === 'undefined') {
-        renderCanvasFallback(container, latestChartPayload, showEma10, showEma20, showForecast);
+        renderCanvasFallback(container, latestChartPayload, showEma10, showEma20, showForecast, showRsi);
         return;
       }
 
+      const is1h = (latestChartPayload.interval || currentInterval) === '1h';
       container.innerHTML = '';
       lwChart = window.LightweightCharts.createChart(container, {
         width: container.clientWidth,
-        height: 390,
+        height: 340,
         layout: {
           background: { type: 'solid', color: 'transparent' },
           textColor: '#9ca3af',
@@ -820,13 +961,11 @@
         },
         timeScale: {
           borderColor: '#1f2937',
-          timeVisible: (latestChartPayload.interval || currentInterval) === '1h',
+          timeVisible: is1h,
           secondsVisible: false,
         },
       });
 
-      const af = latestChartPayload.agent_forecast;
-      const lastCandle = candles[candles.length - 1];
       let fcBar = null;
       if (showForecast && af && lastCandle) {
         const fcRaw = af.forecast_candle || {
@@ -937,20 +1076,164 @@
 
       lwChart.timeScale().fitContent();
 
-      // Actualizar leyenda OHLCV al mover cursor
+      // Sub-gráfica RSI (14) Wilder sincronizada
+      let rsiSeries = null;
+      if (showRsi && rsiContainer) {
+        rsiContainer.innerHTML = '';
+        lwRsiChart = window.LightweightCharts.createChart(rsiContainer, {
+          width: rsiContainer.clientWidth || container.clientWidth,
+          height: 112,
+          layout: {
+            background: { type: 'solid', color: 'transparent' },
+            textColor: '#9ca3af',
+          },
+          grid: {
+            vertLines: { color: 'rgba(31, 41, 55, 0.35)' },
+            horzLines: { color: 'rgba(31, 41, 55, 0.35)' },
+          },
+          crosshair: {
+            mode: window.LightweightCharts.CrosshairMode.Normal,
+          },
+          rightPriceScale: {
+            borderColor: '#1f2937',
+            scaleMargins: { top: 0.08, bottom: 0.08 },
+          },
+          timeScale: {
+            borderColor: '#1f2937',
+            timeVisible: is1h,
+            secondsVisible: false,
+          },
+        });
+
+        rsiSeries = lwRsiChart.addLineSeries({
+          color: '#a855f7',
+          lineWidth: 2,
+          priceLineVisible: false,
+          lastValueVisible: true,
+          autoscaleInfoProvider: () => ({
+            priceRange: { minValue: 0, maxValue: 100 },
+          }),
+        });
+        rsiSeries.setData(candles.map(c => ({
+          time: c.time,
+          value: Number(c.rsi_14 ?? 50),
+        })));
+        rsiSeries.createPriceLine({
+          price: 70,
+          color: '#f43f5e',
+          lineWidth: 1,
+          lineStyle: window.LightweightCharts.LineStyle.Dashed,
+          axisLabelVisible: true,
+          title: '70',
+        });
+        rsiSeries.createPriceLine({
+          price: 50,
+          color: '#64748b',
+          lineWidth: 1,
+          lineStyle: window.LightweightCharts.LineStyle.Dotted,
+          axisLabelVisible: false,
+          title: '50',
+        });
+        rsiSeries.createPriceLine({
+          price: 30,
+          color: '#10b981',
+          lineWidth: 1,
+          lineStyle: window.LightweightCharts.LineStyle.Dashed,
+          axisLabelVisible: true,
+          title: '30',
+        });
+
+        if (showForecast && af && af.projected_rsi_t1 !== undefined && af.next_time && lastCandle) {
+          const rsiFcSeries = lwRsiChart.addLineSeries({
+            color: '#c084fc',
+            lineWidth: 2,
+            lineStyle: window.LightweightCharts.LineStyle.Dashed,
+            priceLineVisible: false,
+            lastValueVisible: true,
+            autoscaleInfoProvider: () => ({
+              priceRange: { minValue: 0, maxValue: 100 },
+            }),
+          });
+          rsiFcSeries.setData([
+            { time: lastCandle.time, value: Number(lastCandle.rsi_14 ?? 50) },
+            { time: af.next_time, value: Number(af.projected_rsi_t1) },
+          ]);
+        }
+
+        lwRsiChart.timeScale().fitContent();
+
+        let isSyncingRange = false;
+        lwChart.timeScale().subscribeVisibleLogicalRangeChange(range => {
+          if (isSyncingRange || !range || !lwRsiChart) return;
+          isSyncingRange = true;
+          lwRsiChart.timeScale().setVisibleLogicalRange(range);
+          isSyncingRange = false;
+        });
+        lwRsiChart.timeScale().subscribeVisibleLogicalRangeChange(range => {
+          if (isSyncingRange || !range || !lwChart) return;
+          isSyncingRange = true;
+          lwChart.timeScale().setVisibleLogicalRange(range);
+          isSyncingRange = false;
+        });
+      }
+
+      // Actualizar leyenda OHLCV + RSI y sincronizar crosshair entre ambas gráficas
       const byTime = new Map(candles.map(c => [String(c.time), c]));
+      let isSyncingCrosshair = false;
       lwChart.subscribeCrosshairMove(param => {
         if (!param || !param.time) {
-          updateOhlcLegend(candles[candles.length - 1]);
+          updateOhlcLegend(lastCandle);
+          updateRsiHeader(lastCandle?.rsi_14 ?? latestChartPayload.last_rsi_14 ?? 50, af);
+          if (!isSyncingCrosshair && lwRsiChart && typeof lwRsiChart.clearCrosshairPosition === 'function') {
+            isSyncingCrosshair = true;
+            lwRsiChart.clearCrosshairPosition();
+            isSyncingCrosshair = false;
+          }
           return;
         }
         const hit = byTime.get(String(param.time));
-        if (hit) updateOhlcLegend(hit);
+        if (hit) {
+          updateOhlcLegend(hit);
+          updateRsiHeader(hit.rsi_14, af);
+          if (!isSyncingCrosshair && lwRsiChart && rsiSeries && typeof lwRsiChart.setCrosshairPosition === 'function') {
+            isSyncingCrosshair = true;
+            lwRsiChart.setCrosshairPosition(Number(hit.rsi_14 ?? 50), hit.time, rsiSeries);
+            isSyncingCrosshair = false;
+          }
+        }
       });
+
+      if (lwRsiChart) {
+        lwRsiChart.subscribeCrosshairMove(param => {
+          if (!param || !param.time) {
+            updateOhlcLegend(lastCandle);
+            updateRsiHeader(lastCandle?.rsi_14 ?? latestChartPayload.last_rsi_14 ?? 50, af);
+            if (!isSyncingCrosshair && lwChart && typeof lwChart.clearCrosshairPosition === 'function') {
+              isSyncingCrosshair = true;
+              lwChart.clearCrosshairPosition();
+              isSyncingCrosshair = false;
+            }
+            return;
+          }
+          const hit = byTime.get(String(param.time));
+          if (hit) {
+            updateOhlcLegend(hit);
+            updateRsiHeader(hit.rsi_14, af);
+            if (!isSyncingCrosshair && lwChart && mainSeries && typeof lwChart.setCrosshairPosition === 'function') {
+              isSyncingCrosshair = true;
+              lwChart.setCrosshairPosition(Number(hit.close), hit.time, mainSeries);
+              isSyncingCrosshair = false;
+            }
+          }
+        });
+      }
 
       lwResizeObserver = new ResizeObserver(() => {
         if (lwChart && container.clientWidth > 0) {
           lwChart.applyOptions({ width: container.clientWidth });
+        }
+        if (lwRsiChart && rsiContainer && rsiContainer.clientWidth > 0) {
+          lwRsiChart.applyOptions({ width: rsiContainer.clientWidth });
         }
       });
       lwResizeObserver.observe(container);
@@ -960,27 +1243,23 @@
       try {
         const sym = symbol || tickerSelect.value || 'BTC-USD';
         const mode = document.getElementById('mode-select').value || 'replay';
-        const presets = RANGE_PRESETS[currentInterval] || RANGE_PRESETS['1d'];
-        const activePreset = presets[currentRangeIdx] || presets[presets.length - 1];
-        const effectiveLimit = activePreset.limit || currentChartLimit;
-        const effectiveInterval = activePreset.fetchInterval || currentInterval;
-        const res = await fetch(`${API_BASE}/api/candles?symbol=${encodeURIComponent(sym)}&limit=${effectiveLimit}&mode=${encodeURIComponent(mode)}&interval=${encodeURIComponent(effectiveInterval)}`);
+        const effectiveInterval = currentInterval === '1h' ? '1h' : '1d';
+        const res = await fetch(`${API_BASE}/api/candles?symbol=${encodeURIComponent(sym)}&limit=${currentChartLimit}&mode=${encodeURIComponent(mode)}&interval=${encodeURIComponent(effectiveInterval)}`);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
         latestChartPayload = data;
 
         const tfTag = (data.interval || effectiveInterval).toUpperCase();
-        const hTag = activePreset.label === '1D' && currentInterval === '1d'
-          ? 'VENTANA 1D (24H)'
-          : (data.horizon_label || (tfTag === '1H' ? '1H' : '1D'));
-        document.getElementById('chart-symbol').textContent = `Gráfica: ${data.symbol} (${tfTag})`;
+        const countLoaded = (data.candles || []).length;
+        const winTag = tfTag === '1H' ? `${countLoaded} HORAS (TRADING 1H)` : `${countLoaded} DÍAS (TRADING 1D)`;
+        document.getElementById('chart-symbol').textContent = `Gráfica: ${data.symbol} (${winTag})`;
         document.getElementById('chart-last-price').textContent = `$${Number(data.last_close).toLocaleString()}`;
         const chgEl = document.getElementById('chart-change-badge');
         const chg = Number(data.change_pct_1d);
         chgEl.textContent = `${chg >= 0 ? '+' : ''}${chg.toFixed(2)}% (${tfTag})`;
         chgEl.className = `px-2 py-0.5 rounded text-xs font-semibold ${chg >= 0 ? 'bg-emerald-500/20 text-emerald-300' : 'bg-rose-500/20 text-rose-300'}`;
         document.getElementById('chart-range').textContent = `Máx: $${Number(data.high_period).toLocaleString()} | Mín: $${Number(data.low_period).toLocaleString()}`;
-        document.getElementById('chart-source-badge').textContent = `${data.data_source} • ${tfTag} • ${hTag}`;
+        document.getElementById('chart-source-badge').textContent = `${data.data_source} • ${tfTag} • ${data.horizon_label || tfTag}`;
 
         renderChartFromState();
       } catch (err) {
@@ -1005,16 +1284,26 @@
         await refreshDashboard();
         if (action === 'step' || action === 'replay') {
           await loadTickerChart(tickerSelect.value);
-          triggerStarPulse(false);
+          if (typeof triggerStarBurst === 'function') triggerStarBurst();
         }
+        return data;
       } catch (err) {
         showFeedback(err.message, true);
+        return null;
       }
     }
 
     async function runReplayBatch(n = 25) {
       const sym = tickerSelect.value;
       await controlAction('replay', { symbol: sym, n_cycles: n, interval: currentInterval });
+    }
+
+    async function runBenchmarkAction() {
+      const sym = tickerSelect.value;
+      const res = await controlAction('benchmark', { symbol: sym, n_cycles: 25, interval: currentInterval });
+      if (res && res.lanes) {
+        renderBenchmarkData(res);
+      }
     }
 
     async function refreshDashboard() {
@@ -1037,10 +1326,30 @@
           if (stRes.source_mode) document.getElementById('mode-select').value = stRes.source_mode;
           if (stRes.candle_interval) currentInterval = stRes.candle_interval;
           if (stRes.qwen_mode) updateQwenModeUI(stRes.qwen_mode);
-          updateTimeframeAndRangeUI();
+          updateTimeframeUI();
           loadTickerChart(tickerSelect.value);
-        } else if (stRes.qwen_mode && stRes.qwen_mode !== currentQwenMode) {
-          updateQwenModeUI(stRes.qwen_mode);
+        } else {
+          if (stRes.qwen_mode && stRes.qwen_mode !== currentQwenMode) {
+            updateQwenModeUI(stRes.qwen_mode);
+          }
+          if (stRes.candle_interval && stRes.candle_interval !== currentInterval) {
+            currentInterval = stRes.candle_interval;
+            updateTimeframeUI();
+          }
+        }
+
+        // Version badge (commit-based)
+        if (stRes.app_version) {
+          const verBadge = document.getElementById('header-version-badge');
+          const verFooter = document.getElementById('footer-version');
+          const verText = stRes.commit_count ? `${stRes.app_version} (${stRes.commit_count} commits)` : stRes.app_version;
+          if (verBadge) {
+            verBadge.textContent = verText;
+            verBadge.title = `Entrega ${stRes.release_milestone || 'V.0.1'} • ${stRes.commit_count || 10} commits • ${stRes.git_sha || 'local'}`;
+          }
+          if (verFooter) {
+            verFooter.textContent = verText;
+          }
         }
 
         // Status badge
@@ -1135,9 +1444,11 @@
             const tr = document.createElement('tr');
             tr.className = 'hover:bg-gray-800/40';
             const rPct = (d.model_pred * 100).toFixed(3);
+            const tfVal = (d.interval || '1d').toUpperCase();
             tr.innerHTML = `
               <td class="py-2 font-mono text-[11px] text-gray-400">${d.candle_close_utc}</td>
               <td class="py-2 font-semibold text-white">${d.symbol}</td>
+              <td class="py-2"><span class="px-1.5 py-0.5 rounded text-[10px] font-mono ${tfVal === '1H' ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30' : 'bg-gray-800 text-gray-300'}">${tfVal}</span></td>
               <td class="py-2"><span class="px-1.5 py-0.5 rounded text-[10px] ${d.source_mode === 'live' ? 'bg-cyan-500/20 text-cyan-300' : 'bg-violet-500/20 text-violet-300'}">${d.source_mode}</span></td>
               <td class="py-2 font-mono ${d.model_pred >= 0 ? 'text-emerald-400' : 'text-rose-400'}">${d.model_pred >= 0 ? '+' : ''}${rPct}%</td>
               <td class="py-2">${d.laya1_json?.regime || '--'}</td>
@@ -1153,73 +1464,196 @@
       }
     }
 
+    function renderBenchmarkData(data) {
+      if (!data || !Array.isArray(data.lanes)) return;
+      const tfLabel = (data.interval || currentInterval || '1d').toUpperCase();
+      document.getElementById('bm-meta').textContent = `${data.symbol} (${tfLabel}) • ${data.cycles_evaluated} Ciclos`;
+      const bBody = document.getElementById('benchmark-body');
+      bBody.innerHTML = '';
+      data.lanes.forEach(l => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td class="py-2 font-semibold text-white">${l.strategy}</td>
+          <td class="py-2 font-mono">$${l.final_equity.toLocaleString()}</td>
+          <td class="py-2 font-bold ${l.net_return_pct >= 0 ? 'text-emerald-400' : 'text-rose-400'}">${l.net_return_pct >= 0 ? '+' : ''}${l.net_return_pct.toFixed(2)}%</td>
+          <td class="py-2 text-amber-300 font-mono">${l.max_drawdown_pct.toFixed(2)}%</td>
+          <td class="py-2">${typeof l.win_rate === 'number' ? l.win_rate + '%' : l.win_rate}</td>
+          <td class="py-2">${l.total_orders}</td>
+          <td class="py-2 font-mono text-gray-400">${l.avg_latency_ms.toFixed(1)} ms</td>
+        `;
+        bBody.appendChild(tr);
+      });
+      document.getElementById('bm-interpretation').textContent = data.interpretation || '';
+    }
+
     async function loadBenchmark() {
       try {
         const res = await fetch(`${API_BASE}/api/benchmark`);
         const data = await res.json();
-        document.getElementById('bm-meta').textContent = `${data.symbol} • ${data.cycles_evaluated} Ciclos`;
-        const bBody = document.getElementById('benchmark-body');
-        bBody.innerHTML = '';
-        data.lanes.forEach(l => {
-          const tr = document.createElement('tr');
-          tr.innerHTML = `
-            <td class="py-2 font-semibold text-white">${l.strategy}</td>
-            <td class="py-2 font-mono">$${l.final_equity.toLocaleString()}</td>
-            <td class="py-2 font-bold ${l.net_return_pct >= 0 ? 'text-emerald-400' : 'text-rose-400'}">${l.net_return_pct >= 0 ? '+' : ''}${l.net_return_pct.toFixed(2)}%</td>
-            <td class="py-2 text-amber-300 font-mono">${l.max_drawdown_pct.toFixed(2)}%</td>
-            <td class="py-2">${typeof l.win_rate === 'number' ? l.win_rate + '%' : l.win_rate}</td>
-            <td class="py-2">${l.total_orders}</td>
-            <td class="py-2 font-mono text-gray-400">${l.avg_latency_ms.toFixed(1)} ms</td>
-          `;
-          bBody.appendChild(tr);
-        });
-        document.getElementById('bm-interpretation').textContent = data.interpretation;
+        renderBenchmarkData(data);
       } catch (err) {
         console.error('Error cargando benchmark:', err);
       }
     }
 
     // =========================================================================
-    // MAPA DE CONSTELACIONES / ESTRELLAS (Paso de Información Multi-Agente)
+    // MAPA DE CONSTELACIONES DINÁMICO (Órbitas, Drag & Drop, Plasma, Ripples & SSE)
     // =========================================================================
     const STAR_NODES = [
-      { id: 'market',  rx: 0.08, ry: 0.34, name: 'Mercado Público',       tag: 'BACK OFFICE',     color: '#38bdf8', r: 9 },
-      { id: 'ingest',  rx: 0.21, ry: 0.22, name: 'Ingesta & Idempotencia',tag: 'SQLITE WAL',      color: '#60a5fa', r: 8 },
-      { id: 'lstm',    rx: 0.34, ry: 0.42, name: 'LSTM T4 Alpha',         tag: 'FRONT OFFICE',    color: '#34d399', r: 10 },
-      { id: 'laya1',   rx: 0.47, ry: 0.23, name: 'Laya #1 (DRL Local)',   tag: 'DRL DUELING A2C', color: '#10b981', r: 10 },
-      { id: 'gateway', rx: 0.59, ry: 0.43, name: 'Auth Gateway',          tag: 'X-API-KEY',       color: '#818cf8', r: 8 },
-      { id: 'qwen',    rx: 0.71, ry: 0.24, name: 'Qwen 14B (API Ext.)',   tag: 'API EXTERNA',     color: '#38bdf8', r: 10 },
-      { id: 'laya2',   rx: 0.81, ry: 0.48, name: 'Laya #2 (Local)',       tag: 'MIDDLE OFFICE',   color: '#10b981', r: 10 },
-      { id: 'risk',    rx: 0.92, ry: 0.31, name: 'Risk Gate & Paper',     tag: 'HARD GATE',       color: '#fbbf24', r: 11 },
-      { id: 'veto',    rx: 0.86, ry: 0.79, name: 'Veto / Pausa Segura',   tag: 'ERROR_LOGS',      color: '#f43f5e', r: 8 },
+      { id: 'market',  baseRx: 0.07, baseRy: 0.42, rx: 0.07, ry: 0.42, name: 'Mercado Público',        tag: 'BACK OFFICE',     color: '#38bdf8', r: 9,  ampX: 5, ampY: 8, spd: 0.0014, ph: 0.2 },
+      { id: 'ingest',  baseRx: 0.19, baseRy: 0.25, rx: 0.19, ry: 0.25, name: 'Ingesta & Idempotencia', tag: 'SQLITE WAL',      color: '#60a5fa', r: 8,  ampX: 6, ampY: 6, spd: 0.0017, ph: 1.1 },
+      { id: 'news',    baseRx: 0.26, baseRy: 0.72, rx: 0.26, ry: 0.72, name: 'Noticias & FinMem',      tag: 'MEMORIA EPISÓDICA',color: '#22d3ee', r: 8, ampX: 7, ampY: 5, spd: 0.0015, ph: 2.0 },
+      { id: 'lstm',    baseRx: 0.34, baseRy: 0.42, rx: 0.34, ry: 0.42, name: 'Quant v2 + LSTM T4',     tag: 'FRONT OFFICE',    color: '#34d399', r: 10, ampX: 5, ampY: 7, spd: 0.0013, ph: 2.8 },
+      { id: 'laya1',   baseRx: 0.46, baseRy: 0.21, rx: 0.46, ry: 0.21, name: 'Laya #1 (DRL Local)',    tag: 'DRL DUELING A2C', color: '#10b981', r: 10, ampX: 7, ampY: 5, spd: 0.0018, ph: 3.4 },
+      { id: 'gateway', baseRx: 0.56, baseRy: 0.46, rx: 0.56, ry: 0.46, name: 'Auth Gateway',           tag: 'X-API-KEY',       color: '#818cf8', r: 8,  ampX: 4, ampY: 7, spd: 0.0016, ph: 4.1 },
+      { id: 'qwen',    baseRx: 0.69, baseRy: 0.23, rx: 0.69, ry: 0.23, name: 'Qwen 14B (API Ext.)',    tag: 'API EXTERNA',     color: '#38bdf8', r: 11, ampX: 6, ampY: 8, spd: 0.0014, ph: 4.9 },
+      { id: 'laya2',   baseRx: 0.80, baseRy: 0.48, rx: 0.80, ry: 0.48, name: 'Laya #2 (Guardia)',      tag: 'MIDDLE OFFICE',   color: '#10b981', r: 10, ampX: 6, ampY: 6, spd: 0.0017, ph: 5.5 },
+      { id: 'risk',    baseRx: 0.92, baseRy: 0.29, rx: 0.92, ry: 0.29, name: 'Risk Gate & Paper',      tag: 'HARD GATE',       color: '#fbbf24', r: 11, ampX: 5, ampY: 6, spd: 0.0015, ph: 6.1 },
+      { id: 'veto',    baseRx: 0.87, baseRy: 0.80, rx: 0.87, ry: 0.80, name: 'Veto / Pausa Segura',    tag: 'ERROR_LOGS',      color: '#f43f5e', r: 8,  ampX: 6, ampY: 5, spd: 0.0019, ph: 0.8 },
     ];
 
     const STAR_EDGES = [
-      { from: 0, to: 1, step: 0, label: 'Velas OHLCV cerradas' },
-      { from: 1, to: 2, step: 1, label: 'Ventana sin leakage' },
-      { from: 2, to: 3, step: 2, label: 'r_hat + EMA + Vol' },
-      { from: 2, to: 6, step: 4, label: 'Métricas T4 directas' },
-      { from: 3, to: 4, step: 3, label: 'Régimen & convicción DRL' },
-      { from: 4, to: 5, step: 4, label: 'Payload autenticado' },
-      { from: 5, to: 3, step: 4.5, curve: -76, isFeedback: true, fbColor: '#f59e0b', label: 'Feedback Qwen ➔ Laya #1 (Δτ, bias)' },
-      { from: 5, to: 6, step: 4.9, curve: 48, isFeedback: true, fbColor: '#e879f9', label: 'Feedback Qwen ➔ Laya #2 (rigor)' },
-      { from: 5, to: 6, step: 5.2, label: 'Dictamen JSON estricto' },
-      { from: 6, to: 7, step: 6, label: 'Auditoría OK' },
-      { from: 6, to: 8, step: 6, label: 'Alerta / Veto', isVeto: true },
-      { from: 7, to: 8, step: 7, label: 'Límite violado', isVeto: true },
+      { id: 'e_mkt_ing',  from: 0, to: 1, step: 0.0, label: 'Velas OHLCV cerradas' },
+      { id: 'e_ing_news', from: 1, to: 2, step: 0.7, label: 'Titulares & FinMem' },
+      { id: 'e_ing_lstm', from: 1, to: 3, step: 1.0, label: 'Ventana sin leakage' },
+      { id: 'e_news_qwn', from: 2, to: 6, step: 2.8, curve: 88, label: 'Sentimiento + Lecciones' },
+      { id: 'e_lstm_ly1', from: 3, to: 4, step: 2.0, label: 'r_hat + ATR + RSI' },
+      { id: 'e_lstm_ly2', from: 3, to: 7, step: 4.1, curve: 62, label: 'Métricas T4 directas' },
+      { id: 'e_ly1_gtw',  from: 4, to: 5, step: 3.0, label: 'Régimen & convicción DRL' },
+      { id: 'e_gtw_qwn',  from: 5, to: 6, step: 3.9, label: 'Payload autenticado' },
+      { id: 'e_qwn_ly1',  from: 6, to: 4, step: 4.6, curve: -78, isFeedback: true, fbColor: '#f59e0b', label: 'Feedback Qwen ➔ Laya #1 (Δτ, bias)' },
+      { id: 'e_qwn_ly2',  from: 6, to: 7, step: 5.0, curve: 46, isFeedback: true, fbColor: '#e879f9', label: 'Feedback Qwen ➔ Laya #2 (rigor)' },
+      { id: 'e_qwn_aud',  from: 6, to: 7, step: 5.4, label: 'Dictamen JSON + Debate' },
+      { id: 'e_ly2_rsk',  from: 7, to: 8, step: 6.2, label: 'Auditoría OK' },
+      { id: 'e_ly2_vet',  from: 7, to: 9, step: 6.4, label: 'Alerta / Veto', isVeto: true },
+      { id: 'e_rsk_vet',  from: 8, to: 9, step: 7.0, label: 'SL/TP/Límite violado', isVeto: true },
     ];
 
-    const BG_STARS = Array.from({ length: 95 }, (_, idx) => ({
+    const BG_STARS = Array.from({ length: 120 }, (_, idx) => ({
       x: ((idx * 173 + 31) % 997) / 997,
       y: ((idx * 317 + 71) % 991) / 991,
-      size: (idx % 3 === 0) ? 1.8 : 1.0,
+      vx: (((idx * 37) % 19) - 9) * 0.000018,
+      vy: (((idx * 53) % 19) - 9) * 0.000018,
+      size: (idx % 4 === 0) ? 1.9 : ((idx % 2 === 0) ? 1.2 : 0.8),
       phase: idx * 0.65,
     }));
 
+    const ACTIVE_COMETS = [];
+    const STAR_RIPPLES = [];
+    const STAR_SPARKS = [];
+    const NODE_HEAT = new Map();
+
     let starPulseStart = performance.now();
     let starHoveredIdx = -1;
-    let starSelectedIdx = 2;
+    let starSelectedIdx = 3;
+    let starDragIdx = -1;
+    let starDragMoved = false;
+    let starMousePos = { x: -1000, y: -1000, inside: false };
+    let starSpeedMult = 1;
+    let starDynamicMode = true;
+    let starLiveFeedDetail = null;
     let lastRenderBadgeAt = 0;
+
+    function getNodeCoords(idx, w, h, now) {
+      const n = STAR_NODES[idx];
+      if (!n) return { x: 0, y: 0 };
+      let ox = 0;
+      let oy = 0;
+      if (starDynamicMode && starDragIdx !== idx) {
+        const sMult = 0.7 + 0.35 * starSpeedMult;
+        ox = Math.cos(now * n.spd * sMult + n.ph) * n.ampX;
+        oy = Math.sin(now * n.spd * 1.3 * sMult + n.ph * 1.4) * n.ampY;
+      }
+      return {
+        x: Math.max(36, Math.min(w - 36, n.rx * w + ox)),
+        y: Math.max(32, Math.min(h - 54, n.ry * h + oy)),
+      };
+    }
+
+    function spawnSparks(x, y, color, count = 16) {
+      for (let i = 0; i < count; i++) {
+        const ang = (Math.PI * 2 * i) / count + (Math.random() - 0.5) * 0.4;
+        const spd = 0.7 + Math.random() * 2.2;
+        STAR_SPARKS.push({
+          x,
+          y,
+          vx: Math.cos(ang) * spd,
+          vy: Math.sin(ang) * spd,
+          life: 1.0,
+          decay: 0.022 + Math.random() * 0.02,
+          color,
+          size: 1.5 + Math.random() * 2.0,
+        });
+      }
+    }
+
+    function spawnRipple(nodeId, color) {
+      const idx = STAR_NODES.findIndex(n => n.id === nodeId);
+      if (idx === -1) return;
+      NODE_HEAT.set(nodeId, performance.now());
+      STAR_RIPPLES.push({ idx, color: color || STAR_NODES[idx].color, start: performance.now(), duration: 950 });
+    }
+
+    function launchCometOnEdge(edgeId, customColor = null, speedScale = 1.0) {
+      const edgeIdx = STAR_EDGES.findIndex(e => e.id === edgeId);
+      if (edgeIdx === -1) return;
+      const edge = STAR_EDGES[edgeIdx];
+      const b = STAR_NODES[edge.to];
+      const latMs = getStarLatencyMs(b.id);
+      // Latencias más bajas viajan más rápido, pero siempre visibles (entre 320ms y 950ms base)
+      const baseDur = latMs !== null && latMs !== undefined
+        ? Math.max(320, Math.min(950, 340 + Number(latMs) * 1.6))
+        : 560;
+      ACTIVE_COMETS.push({
+        edgeIdx,
+        progress: 0,
+        durationMs: Math.max(180, baseDur / (starSpeedMult * speedScale)),
+        color: customColor || (edge.isFeedback ? (edge.fbColor || '#f59e0b') : (edge.isVeto ? '#fb7185' : b.color)),
+        lastTs: performance.now(),
+      });
+    }
+
+    function triggerStarBurst() {
+      starPulseStart = performance.now();
+      STAR_EDGES.filter(e => !e.isVeto).forEach((e, k) => {
+        setTimeout(() => launchCometOnEdge(e.id), k * Math.round(90 / starSpeedMult));
+      });
+      spawnRipple('market', '#38bdf8');
+    }
+
+    function triggerStarPulse() {
+      triggerStarBurst();
+    }
+
+    function cycleStarSpeed() {
+      const order = [1, 2, 3];
+      const nextIdx = (order.indexOf(starSpeedMult) + 1) % order.length;
+      starSpeedMult = order[nextIdx];
+      const btn = document.getElementById('btn-star-speed');
+      if (btn) {
+        btn.textContent = starSpeedMult === 3 ? '⚡ Velocidad: 3x Turbo' : `⚡ Velocidad: ${starSpeedMult}x`;
+      }
+      triggerStarBurst();
+    }
+
+    function toggleStarDynamic() {
+      starDynamicMode = !starDynamicMode;
+      const btn = document.getElementById('btn-star-dynamic');
+      if (btn) {
+        btn.textContent = starDynamicMode ? '🌀 Órbita & Partículas: ON' : '⏸️ Órbita: PAUSA';
+        btn.className = starDynamicMode
+          ? 'rounded-lg border border-emerald-500/40 bg-emerald-500/15 px-2.5 py-1.5 text-xs font-semibold text-emerald-200 hover:bg-emerald-500/25 transition'
+          : 'rounded-lg border border-gray-700 bg-gray-900 px-2.5 py-1.5 text-xs font-semibold text-gray-400 hover:text-white transition';
+      }
+    }
+
+    function resetStarPositions() {
+      STAR_NODES.forEach(n => {
+        n.rx = n.baseRx;
+        n.ry = n.baseRy;
+      });
+      triggerStarBurst();
+    }
 
     function getStarLatencyMs(nodeId) {
       const lat = (latestStatusData?.stage_latencies_ms && Object.keys(latestStatusData.stage_latencies_ms).length)
@@ -1228,6 +1662,7 @@
       switch (nodeId) {
         case 'market':  return latestStatusData?._client_sync_ms ?? null;
         case 'ingest':  return lat.ingest_ms ?? null;
+        case 'news':    return lat.news_memory_ms ?? null;
         case 'lstm':    return lat.lstm_ms ?? null;
         case 'laya1':   return lat.laya1_ms ?? latestDecisionData?.laya1_json?.latency_ms ?? null;
         case 'gateway': return 0.1;
@@ -1239,6 +1674,9 @@
     }
 
     function getStarDetailPayload(nodeId) {
+      if (starLiveFeedDetail && starLiveFeedDetail.nodeId === nodeId) {
+        return starLiveFeedDetail.text;
+      }
       const sym = latestStatusData?.active_ticker || tickerSelect.value || 'BTC-USD';
       const tf = currentInterval;
       const af = latestChartPayload?.agent_forecast;
@@ -1256,23 +1694,25 @@
 
       switch (nodeId) {
         case 'market':
-          return `Símbolo: ${sym} | TF: ${tf} | Sync: ${msTxt} | Cierre: $${latestChartPayload?.last_close?.toLocaleString() || '--'}`;
+          return `Símbolo: ${sym} | TF: ${tf.toUpperCase()} | Sync: ${msTxt} | Cierre: $${latestChartPayload?.last_close?.toLocaleString() || '--'}`;
         case 'ingest':
           return `Velas SQLite WAL: ${latestStatusData?.processed_candles_count ?? 0} | Ingesta: ${msTxt}`;
+        case 'news':
+          return `Sentimiento RSS + Memoria Episódica Post-Trade | Tiempo: ${msTxt}`;
         case 'lstm':
-          return `r_hat(${tf === '1h' ? '+1H' : '+1D'}): ${rHat} | Vol_20: ${af?.vol_20 ?? '--'} | LSTM: ${msTxt}`;
+          return `r_hat(${tf === '1h' ? '+1H' : '+1D'}): ${rHat} | RSI(14): ${af?.rsi_14 ?? latestChartPayload?.last_rsi_14 ?? '--'} | Vol_20: ${af?.vol_20 ?? '--'} | Model: ${msTxt}`;
         case 'laya1':
           return `Régimen: ${af?.regime || dec?.laya1_json?.regime || '--'} | DRL: ${msTxt} | Feedback Qwen (Δτ=${fb1.temperature_delta ?? 0}, bias=${fb1.conviction_bias ?? 0}): ${fb1.guidance || '--'}`;
         case 'gateway':
           return `Validación X-API-Key / HttpOnly | Verificación: ${msTxt}`;
         case 'qwen':
-          return `Acción: ${dec?.qwen_json?.action || af?.signal_action || 'HOLD'} | Qwen: ${msTxt} | Envía feedback a Laya #1 y #2`;
+          return `Acción: ${dec?.qwen_json?.action || af?.signal_action || 'HOLD'} | Qwen: ${msTxt} | Debate Bull/Bear & Feedback`;
         case 'laya2':
-          return `Seguridad: ${dec?.laya2_json?.security_status || 'SAFE'} | Guardia: ${msTxt} | Feedback rigor=${fb2.strictness_level || 'standard'} (coh≥${fb2.min_coherence_threshold ?? 0.75})`;
+          return `Seguridad: ${dec?.laya2_json?.security_status || 'SAFE'} | Guardia: ${msTxt} | Rigor=${fb2.strictness_level || 'standard'} (coh≥${fb2.min_coherence_threshold ?? 0.75})`;
         case 'risk':
           return `Veredicto: ${dec?.final_action || 'HOLD'} (${dec?.risk_status || 'APPROVED'}) | Equity: $${Number(eq).toLocaleString()} | Risk+Paper: ${msTxt}`;
         case 'veto':
-          return `Kill-Switch: ${latestStatusData?.system_status || 'RUNNING'} | Cero órdenes reales`;
+          return `Kill-Switch: ${latestStatusData?.system_status || 'RUNNING'} | SL / Trailing / TP Hard Gate`;
         default:
           return '';
       }
@@ -1286,8 +1726,63 @@
       document.getElementById('star-hud-detail').textContent = getStarDetailPayload(node.id);
     }
 
-    function triggerStarPulse() {
-      starPulseStart = performance.now();
+    function connectPipelineSSE() {
+      if (typeof window.EventSource === 'undefined') return;
+      const badge = document.getElementById('badge-sse-status');
+      const es = new EventSource(`${API_BASE}/api/stream/events`);
+      es.onopen = () => {
+        if (badge) {
+          badge.textContent = 'SSE: LIVE';
+          badge.className = 'px-2 py-0.5 rounded-full text-[10px] font-mono bg-emerald-500/20 text-emerald-300 border border-emerald-500/40';
+        }
+      };
+      es.onerror = () => {
+        if (badge) {
+          badge.textContent = 'SSE: RECONECTANDO';
+          badge.className = 'px-2 py-0.5 rounded-full text-[10px] font-mono bg-amber-500/20 text-amber-300 border border-amber-500/40';
+        }
+      };
+
+      const handleStage = (evName, edgeIds, nodeId, summaryFn) => {
+        es.addEventListener(evName, ev => {
+          try {
+            const parsed = JSON.parse(ev.data || '{}');
+            const d = parsed.data || {};
+            edgeIds.forEach(eid => launchCometOnEdge(eid, null, 1.35));
+            spawnRipple(nodeId);
+            const nIdx = STAR_NODES.findIndex(n => n.id === nodeId);
+            if (nIdx !== -1 && summaryFn) {
+              starLiveFeedDetail = { nodeId, text: summaryFn(d) };
+              if (starSelectedIdx === nIdx) updateStarHud(nIdx);
+            }
+          } catch (_) {}
+        });
+      };
+
+      handleStage('stage_ingest', ['e_mkt_ing'], 'ingest', d => `[SSE LIVE] Vela ${d.symbol} (${d.interval}) cierre $${d.close} | Ingesta: ${d.latency_ms} ms`);
+      handleStage('stage_quant_model', ['e_ing_lstm'], 'lstm', d => `[SSE LIVE] ${d.model_detail} r_hat=${(Number(d.pred_return_t1) * 100).toFixed(3)}% | ATR=${d.atr_14} | ${d.latency_ms} ms`);
+      handleStage('stage_news_memory', ['e_ing_news', 'e_news_qwn'], 'news', d => `[SSE LIVE] Sentimiento: ${d.sentiment_label} | Memorias FinMem: ${d.memories_count} | ${d.latency_ms} ms`);
+      handleStage('stage_laya1_drl', ['e_lstm_ly1', 'e_ly1_gtw'], 'laya1', d => `[SSE LIVE] Régimen: ${d.regime} | Señal DRL: ${d.signal_action} | Conv=${d.conviction_score} | ${d.latency_ms} ms`);
+      handleStage('stage_qwen_orch', ['e_gtw_qwn'], 'qwen', d => `[SSE LIVE] Propuesta Qwen (${d.model}): ${d.action} | ${d.latency_ms} ms`);
+      handleStage('stage_feedback', ['e_qwn_ly1', 'e_qwn_ly2'], 'qwen', d => `[SSE LIVE] Feedback (${d.feedback_source}) -> Laya #1 (${d.feedback_laya1_ms}ms) & Laya #2 (${d.feedback_laya2_ms}ms)`);
+      handleStage('stage_laya2_guard', ['e_qwn_aud', 'e_lstm_ly2'], 'laya2', d => `[SSE LIVE] Laya #2: ${d.security_status} | Coh=${d.coherence_prob} >= ${d.min_coherence_threshold} | ${d.latency_ms} ms`);
+      handleStage('stage_risk_paper', ['e_ly2_rsk'], 'risk', d => `[SSE LIVE] Final: ${d.final_action} (${d.risk_status}) | Equity: $${d.equity} | ${d.latency_ms} ms`);
+
+      es.addEventListener('cycle_complete', ev => {
+        try {
+          const parsed = JSON.parse(ev.data || '{}');
+          const d = parsed.data || {};
+          spawnRipple('risk', '#10b981');
+          starLiveFeedDetail = {
+            nodeId: 'risk',
+            text: `[CICLO COMPLETO #${d.decision_id}] ${d.symbol} (${d.interval}) -> ${d.final_action} (${d.risk_status}) | ${d.total_cycle_ms} ms`,
+          };
+          refreshDashboard();
+          if (d.symbol === tickerSelect.value && d.interval === currentInterval) {
+            loadTickerChart(tickerSelect.value);
+          }
+        } catch (_) {}
+      });
     }
 
     function initStarConstellation() {
@@ -1298,39 +1793,84 @@
       const resizeCanvas = () => {
         const rect = canvas.parentElement.getBoundingClientRect();
         canvas.width = Math.max(320, Math.floor(rect.width));
-        canvas.height = 440;
+        canvas.height = 460;
       };
       resizeCanvas();
       window.addEventListener('resize', resizeCanvas);
+
+      canvas.addEventListener('mousedown', ev => {
+        const rect = canvas.getBoundingClientRect();
+        const mx = ev.clientX - rect.left;
+        const my = ev.clientY - rect.top;
+        const now = performance.now();
+        starDragIdx = -1;
+        starDragMoved = false;
+        STAR_NODES.forEach((n, i) => {
+          const pos = getNodeCoords(i, canvas.width, canvas.height, now);
+          if (Math.hypot(mx - pos.x, my - pos.y) <= 26) {
+            starDragIdx = i;
+            starSelectedIdx = i;
+            starLiveFeedDetail = null;
+            updateStarHud(i);
+          }
+        });
+      });
 
       canvas.addEventListener('mousemove', ev => {
         const rect = canvas.getBoundingClientRect();
         const mx = ev.clientX - rect.left;
         const my = ev.clientY - rect.top;
+        starMousePos = { x: mx, y: my, inside: true };
+
+        if (starDragIdx !== -1) {
+          starDragMoved = true;
+          STAR_NODES[starDragIdx].rx = Math.max(0.04, Math.min(0.96, mx / canvas.width));
+          STAR_NODES[starDragIdx].ry = Math.max(0.08, Math.min(0.88, my / canvas.height));
+          return;
+        }
+
+        const now = performance.now();
         let found = -1;
         STAR_NODES.forEach((n, i) => {
-          const nx = n.rx * canvas.width;
-          const ny = n.ry * canvas.height;
-          if (Math.hypot(mx - nx, my - ny) <= 24) found = i;
+          const pos = getNodeCoords(i, canvas.width, canvas.height, now);
+          if (Math.hypot(mx - pos.x, my - pos.y) <= 26) found = i;
         });
         starHoveredIdx = found;
+        canvas.style.cursor = found !== -1 ? 'grab' : 'default';
         if (found !== -1) updateStarHud(found);
       });
 
-      canvas.addEventListener('click', ev => {
-        const rect = canvas.getBoundingClientRect();
-        const mx = ev.clientX - rect.left;
-        const my = ev.clientY - rect.top;
-        STAR_NODES.forEach((n, i) => {
-          const nx = n.rx * canvas.width;
-          const ny = n.ry * canvas.height;
-          if (Math.hypot(mx - nx, my - ny) <= 26) {
-            starSelectedIdx = i;
-            updateStarHud(i);
-            triggerStarPulse();
+      window.addEventListener('mouseup', () => {
+        if (starDragIdx !== -1) {
+          if (!starDragMoved) {
+            triggerStarBurst();
+          } else {
+            spawnRipple(STAR_NODES[starDragIdx].id);
           }
-        });
+          starDragIdx = -1;
+        }
       });
+
+      canvas.addEventListener('mouseleave', () => {
+        starMousePos.inside = false;
+        starHoveredIdx = -1;
+      });
+
+      function getRegimePalette() {
+        const regime = (latestChartPayload?.agent_forecast?.regime || latestDecisionData?.laya1_json?.regime || 'sideways').toLowerCase();
+        if (regime.includes('bull')) return { center: '#052e2b', mid: '#041822', accent: 'rgba(16, 185, 129, 0.20)' };
+        if (regime.includes('bear')) return { center: '#2d0a1a', mid: '#140615', accent: 'rgba(244, 63, 94, 0.20)' };
+        if (regime.includes('high_vol')) return { center: '#291532', mid: '#120a1f', accent: 'rgba(245, 158, 11, 0.20)' };
+        return { center: '#0a1438', mid: '#040819', accent: 'rgba(56, 189, 248, 0.16)' };
+      }
+
+      function quadPoint(x1, y1, cx, cy, x2, y2, t) {
+        const mt = 1 - t;
+        return {
+          x: mt * mt * x1 + 2 * mt * t * cx + t * t * x2,
+          y: mt * mt * y1 + 2 * mt * t * cy + t * t * y2,
+        };
+      }
 
       function drawFrame(now) {
         const tFrame0 = performance.now();
@@ -1338,58 +1878,87 @@
         const h = canvas.height;
         ctx.clearRect(0, 0, w, h);
 
-        // Cielo nocturno y nebulosa sutil
-        const bgGrad = ctx.createRadialGradient(w * 0.5, h * 0.4, 20, w * 0.5, h * 0.5, w * 0.75);
-        bgGrad.addColorStop(0, '#090f2b');
-        bgGrad.addColorStop(0.55, '#040819');
+        // 1) Nebulosa reactiva al régimen de mercado
+        const pal = getRegimePalette();
+        const bgGrad = ctx.createRadialGradient(w * 0.52, h * 0.42, 24, w * 0.5, h * 0.5, w * 0.78);
+        bgGrad.addColorStop(0, pal.center);
+        bgGrad.addColorStop(0.58, pal.mid);
         bgGrad.addColorStop(1, '#02040d');
         ctx.fillStyle = bgGrad;
         ctx.fillRect(0, 0, w, h);
 
-        // Estrellas de fondo parpadeantes
-        BG_STARS.forEach(s => {
-          const alpha = 0.22 + 0.35 * (0.5 + 0.5 * Math.sin(now * 0.0018 + s.phase));
+        // 2) Campo estelar a la deriva + red de filamentos de proximidad y cursor
+        const driftScale = starDynamicMode ? starSpeedMult : 0;
+        const pts = BG_STARS.map(s => {
+          s.x = (s.x + s.vx * driftScale + 1.0) % 1.0;
+          s.y = (s.y + s.vy * driftScale + 1.0) % 1.0;
+          const sx = s.x * w;
+          const sy = s.y * h;
+          const alpha = 0.22 + 0.42 * (0.5 + 0.5 * Math.sin(now * 0.0022 + s.phase));
           ctx.fillStyle = `rgba(226, 232, 240, ${alpha.toFixed(2)})`;
           ctx.beginPath();
-          ctx.arc(s.x * w, s.y * h, s.size, 0, Math.PI * 2);
+          ctx.arc(sx, sy, s.size, 0, Math.PI * 2);
           ctx.fill();
+          return { x: sx, y: sy };
         });
 
-        // Progreso cíclico del pulso (0..8 pasos cada 5.6s)
-        const elapsedSec = ((now - starPulseStart) / 1000.0) % 5.6;
-        const activeStep = (elapsedSec / 5.6) * 7.5;
+        ctx.lineWidth = 0.7;
+        for (let i = 0; i < pts.length; i += 2) {
+          const p1 = pts[i];
+          if (starMousePos.inside) {
+            const md = Math.hypot(p1.x - starMousePos.x, p1.y - starMousePos.y);
+            if (md < 120) {
+              ctx.strokeStyle = `rgba(56, 189, 248, ${(0.28 * (1 - md / 120)).toFixed(3)})`;
+              ctx.beginPath();
+              ctx.moveTo(p1.x, p1.y);
+              ctx.lineTo(starMousePos.x, starMousePos.y);
+              ctx.stroke();
+            }
+          }
+          for (let j = i + 2; j < Math.min(i + 16, pts.length); j += 2) {
+            const p2 = pts[j];
+            const dist = Math.hypot(p1.x - p2.x, p1.y - p2.y);
+            if (dist < 78) {
+              ctx.strokeStyle = `rgba(129, 140, 248, ${(0.12 * (1 - dist / 78)).toFixed(3)})`;
+              ctx.beginPath();
+              ctx.moveTo(p1.x, p1.y);
+              ctx.lineTo(p2.x, p2.y);
+              ctx.stroke();
+            }
+          }
+        }
+
+        // Precalcular posiciones orbitales actuales de cada estrella
+        const nodePos = STAR_NODES.map((_, idx) => getNodeCoords(idx, w, h, now));
+        const cycleDuration = 5.4 / starSpeedMult;
+        const elapsedSec = ((now - starPulseStart) / 1000.0) % cycleDuration;
+        const activeStep = (elapsedSec / cycleDuration) * 7.8;
         const isVetoed = latestDecisionData?.risk_status === 'REJECTED' || latestStatusData?.system_status === 'STOPPED';
 
-        const quadPoint = (x1, y1, cx, cy, x2, y2, t) => {
-          const mt = 1 - t;
-          return {
-            x: mt * mt * x1 + 2 * mt * t * cx + t * t * x2,
-            y: mt * mt * y1 + 2 * mt * t * cy + t * t * y2,
-          };
-        };
-
-        // Dibujar aristas de constelación, lazos de feedback curvos y cometas de datos
-        STAR_EDGES.forEach(edge => {
-          const a = STAR_NODES[edge.from];
+        // 3) Aristas de constelación + flujos continuos de plasma multi-cometa
+        STAR_EDGES.forEach((edge, eIdx) => {
+          const pA = nodePos[edge.from];
+          const pB = nodePos[edge.to];
           const b = STAR_NODES[edge.to];
-          const x1 = a.rx * w, y1 = a.ry * h;
-          const x2 = b.rx * w, y2 = b.ry * h;
+          const x1 = pA.x, y1 = pA.y;
+          const x2 = pB.x, y2 = pB.y;
           const hasCurve = typeof edge.curve === 'number';
           const cx = (x1 + x2) * 0.5;
           const cy = (y1 + y2) * 0.5 + (edge.curve || 0);
 
           ctx.save();
           if (edge.isFeedback) {
-            ctx.setLineDash([5, 4]);
-            ctx.strokeStyle = edge.fbColor === '#e879f9' ? 'rgba(232, 121, 249, 0.55)' : 'rgba(245, 158, 11, 0.55)';
+            ctx.setLineDash([6, 4]);
+            ctx.lineDashOffset = -(now * 0.025 * starSpeedMult);
+            ctx.strokeStyle = edge.fbColor === '#e879f9' ? 'rgba(232, 121, 249, 0.62)' : 'rgba(245, 158, 11, 0.62)';
             ctx.lineWidth = 2.0;
           } else if (edge.isVeto) {
             ctx.setLineDash([4, 5]);
-            ctx.strokeStyle = isVetoed ? 'rgba(244, 63, 94, 0.55)' : 'rgba(244, 63, 94, 0.16)';
+            ctx.strokeStyle = isVetoed ? 'rgba(244, 63, 94, 0.65)' : 'rgba(244, 63, 94, 0.18)';
             ctx.lineWidth = 1.6;
           } else {
-            ctx.strokeStyle = 'rgba(129, 140, 248, 0.28)';
-            ctx.lineWidth = 1.6;
+            ctx.strokeStyle = 'rgba(129, 140, 248, 0.32)';
+            ctx.lineWidth = 1.7;
           }
           ctx.beginPath();
           ctx.moveTo(x1, y1);
@@ -1405,18 +1974,18 @@
             ctx.fillStyle = edge.fbColor || '#f59e0b';
             ctx.font = 'bold 10px monospace';
             ctx.textAlign = 'center';
-            ctx.fillText(edge.from === 5 && edge.to === 3 ? 'Feedback DRL (Δτ, bias)' : 'Feedback Guardia (rigor)', mid.x, mid.y - 6);
+            ctx.fillText(edge.to === 4 ? 'Feedback DRL (Δτ, bias)' : 'Feedback Guardia (rigor)', mid.x, mid.y - 6);
           }
           ctx.restore();
 
-          // Cometa luminoso recorriendo esta arista en su paso correspondiente
+          // Cometa de ciclo continuo
           const shouldPulse = edge.isVeto ? isVetoed : true;
           const localProg = activeStep - edge.step;
           if (shouldPulse && localProg >= 0 && localProg <= 1.0) {
             const p = hasCurve
               ? quadPoint(x1, y1, cx, cy, x2, y2, localProg)
               : { x: x1 + (x2 - x1) * localProg, y: y1 + (y2 - y1) * localProg };
-            const tTail = Math.max(0, localProg - 0.18);
+            const tTail = Math.max(0, localProg - 0.22);
             const tail = hasCurve
               ? quadPoint(x1, y1, cx, cy, x2, y2, tTail)
               : { x: x1 + (x2 - x1) * tTail, y: y1 + (y2 - y1) * tTail };
@@ -1426,7 +1995,7 @@
             grad.addColorStop(0, 'rgba(255,255,255,0)');
             grad.addColorStop(1, cometColor);
             ctx.strokeStyle = grad;
-            ctx.lineWidth = 3.2;
+            ctx.lineWidth = 3.5;
             ctx.beginPath();
             ctx.moveTo(tail.x, tail.y);
             ctx.lineTo(p.x, p.y);
@@ -1434,50 +2003,148 @@
 
             ctx.fillStyle = '#ffffff';
             ctx.shadowColor = cometColor;
-            ctx.shadowBlur = 12;
+            ctx.shadowBlur = 14;
             ctx.beginPath();
-            ctx.arc(p.x, p.y, 3.8, 0, Math.PI * 2);
+            ctx.arc(p.x, p.y, 4.0, 0, Math.PI * 2);
             ctx.fill();
             ctx.shadowBlur = 0;
+
+            if (starDynamicMode && localProg > 0.94 && Math.random() < 0.28) {
+              NODE_HEAT.set(b.id, now);
+            }
           }
         });
 
-        // Dibujar estrellas principales
+        // 4) Cometas disparados por eventos SSE / ráfagas de usuario
+        for (let i = ACTIVE_COMETS.length - 1; i >= 0; i--) {
+          const c = ACTIVE_COMETS[i];
+          const dt = now - c.lastTs;
+          c.lastTs = now;
+          c.progress += dt / c.durationMs;
+          const edge = STAR_EDGES[c.edgeIdx];
+          if (!edge || c.progress >= 1.0) {
+            if (edge) {
+              const targetPos = nodePos[edge.to];
+              spawnRipple(STAR_NODES[edge.to].id, c.color);
+              if (starDynamicMode) spawnSparks(targetPos.x, targetPos.y, c.color, 14);
+            }
+            ACTIVE_COMETS.splice(i, 1);
+            continue;
+          }
+          const pA = nodePos[edge.from];
+          const pB = nodePos[edge.to];
+          const hasCurve = typeof edge.curve === 'number';
+          const cx = (pA.x + pB.x) * 0.5;
+          const cy = (pA.y + pB.y) * 0.5 + (edge.curve || 0);
+          const prog = Math.max(0, Math.min(1, c.progress));
+          const tTail = Math.max(0, prog - 0.26);
+          const p = hasCurve ? quadPoint(pA.x, pA.y, cx, cy, pB.x, pB.y, prog) : { x: pA.x + (pB.x - pA.x) * prog, y: pA.y + (pB.y - pA.y) * prog };
+          const tail = hasCurve ? quadPoint(pA.x, pA.y, cx, cy, pB.x, pB.y, tTail) : { x: pA.x + (pB.x - pA.x) * tTail, y: pA.y + (pB.y - pA.y) * tTail };
+
+          const grad = ctx.createLinearGradient(tail.x, tail.y, p.x, p.y);
+          grad.addColorStop(0, 'rgba(255,255,255,0)');
+          grad.addColorStop(1, c.color);
+          ctx.strokeStyle = grad;
+          ctx.lineWidth = 4.5;
+          ctx.beginPath();
+          ctx.moveTo(tail.x, tail.y);
+          ctx.lineTo(p.x, p.y);
+          ctx.stroke();
+
+          ctx.fillStyle = '#ffffff';
+          ctx.shadowColor = c.color;
+          ctx.shadowBlur = 18;
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, 4.8, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.shadowBlur = 0;
+        }
+
+        // 5) Ondas de choque (Shockwave Ripples) al impacto en estrella
+        for (let i = STAR_RIPPLES.length - 1; i >= 0; i--) {
+          const rp = STAR_RIPPLES[i];
+          const age = now - rp.start;
+          if (age >= rp.duration) {
+            STAR_RIPPLES.splice(i, 1);
+            continue;
+          }
+          const t = age / rp.duration;
+          const pos = nodePos[rp.idx];
+          if (!pos) continue;
+          const rad = 10 + t * 38;
+          ctx.save();
+          ctx.strokeStyle = rp.color;
+          ctx.globalAlpha = (1 - t) * 0.78;
+          ctx.lineWidth = 2.2 * (1 - t * 0.6);
+          ctx.beginPath();
+          ctx.arc(pos.x, pos.y, rad, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.restore();
+        }
+
+        // 6) Chispas / Partículas radiantes
+        for (let i = STAR_SPARKS.length - 1; i >= 0; i--) {
+          const sp = STAR_SPARKS[i];
+          sp.x += sp.vx * starSpeedMult;
+          sp.y += sp.vy * starSpeedMult;
+          sp.vx *= 0.96;
+          sp.vy *= 0.96;
+          sp.life -= sp.decay;
+          if (sp.life <= 0) {
+            STAR_SPARKS.splice(i, 1);
+            continue;
+          }
+          ctx.save();
+          ctx.globalAlpha = sp.life;
+          ctx.fillStyle = sp.color;
+          ctx.beginPath();
+          ctx.arc(sp.x, sp.y, sp.size, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
+        }
+
+        // 7) Estrellas principales con anillos rotatorios y coronas pulsantes
         STAR_NODES.forEach((n, idx) => {
-          const x = n.rx * w;
-          const y = n.ry * h;
-          const isFocus = idx === starHoveredIdx || idx === starSelectedIdx;
-          const stepHit = Math.max(0, 1 - Math.abs(activeStep - idx) * 1.1);
-          const haloR = n.r * (2.1 + stepHit * 1.4 + (isFocus ? 0.9 : 0));
+          const { x, y } = nodePos[idx];
+          const isFocus = idx === starHoveredIdx || idx === starSelectedIdx || idx === starDragIdx;
+          const heatAge = now - (NODE_HEAT.get(n.id) || 0);
+          const heatBoost = heatAge < 1100 ? (1 - heatAge / 1100) : 0;
+          const stepHit = Math.max(heatBoost, Math.max(0, 1 - Math.abs(activeStep - idx) * 1.1));
+          const haloR = n.r * (2.3 + stepHit * 1.6 + (isFocus ? 1.0 : 0));
 
           const halo = ctx.createRadialGradient(x, y, 2, x, y, haloR);
-          halo.addColorStop(0, n.color + 'cc');
-          halo.addColorStop(0.5, n.color + '33');
+          halo.addColorStop(0, n.color + 'dd');
+          halo.addColorStop(0.45, n.color + '44');
           halo.addColorStop(1, 'rgba(0,0,0,0)');
           ctx.fillStyle = halo;
           ctx.beginPath();
           ctx.arc(x, y, haloR, 0, Math.PI * 2);
           ctx.fill();
 
-          // Estrella central brillante
+          // Anillo orbital giratorio
+          if (starDynamicMode) {
+            ctx.save();
+            ctx.translate(x, y);
+            ctx.rotate(now * 0.0014 * (idx % 2 === 0 ? 1 : -1) * starSpeedMult);
+            ctx.setLineDash([4, 5]);
+            ctx.strokeStyle = isFocus || stepHit > 0.25 ? n.color : `${n.color}66`;
+            ctx.lineWidth = isFocus ? 1.8 : 1.1;
+            ctx.beginPath();
+            ctx.arc(0, 0, n.r + (isFocus ? 7 : 5), 0, Math.PI * 2);
+            ctx.stroke();
+            ctx.restore();
+          }
+
+          // Núcleo brillante
           ctx.fillStyle = '#f8fafc';
           ctx.shadowColor = n.color;
-          ctx.shadowBlur = isFocus ? 18 : 10;
+          ctx.shadowBlur = isFocus ? 20 : 12;
           ctx.beginPath();
-          ctx.arc(x, y, n.r * (isFocus ? 0.85 : 0.72), 0, Math.PI * 2);
+          ctx.arc(x, y, n.r * (isFocus ? 0.88 : 0.72 + stepHit * 0.14), 0, Math.PI * 2);
           ctx.fill();
           ctx.shadowBlur = 0;
 
-          // Anillo exterior si seleccionada
-          if (isFocus) {
-            ctx.strokeStyle = n.color;
-            ctx.lineWidth = 1.5;
-            ctx.beginPath();
-            ctx.arc(x, y, n.r + 5, 0, Math.PI * 2);
-            ctx.stroke();
-          }
-
-          // Etiquetas + latencia en ms por estrella
+          // Etiquetas + latencia en ms
           ctx.textAlign = 'center';
           ctx.fillStyle = '#f1f5f9';
           ctx.font = 'bold 11px system-ui, sans-serif';
@@ -1505,6 +2172,7 @@
       }
 
       updateStarHud(starSelectedIdx);
+      connectPipelineSSE();
       requestAnimationFrame(drawFrame);
     }
 
