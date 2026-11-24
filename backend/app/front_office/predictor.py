@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -29,6 +29,7 @@ from backend.app.front_office.features import (
     build_sequences,
     compute_technical_features,
 )
+from backend.app.ml.candle_predictor.inference import CandleV2Runtime
 
 
 class LSTMRegressor(nn.Module):
@@ -114,6 +115,13 @@ class PredictionResult:
     atr_pct: float = 0.0
     interval: str = "1d"
     model_detail: str = "lstm_v1"
+    pred_volatility_t1: float = 0.0
+    candle_v2_return: float = 0.0
+    direction_probs: Dict[str, float] = field(default_factory=dict)
+    direction_confidence: float = 0.0
+    abstain: bool = False
+    candle_v2_latent: List[float] = field(default_factory=list)
+    candle_v2_enabled: bool = False
 
 
 class QuantPredictor:
@@ -184,6 +192,29 @@ class QuantPredictor:
         self.quant_v2_manifest: Dict[str, Any] = {}
         self._load_quant_v2(verify_hashes=verify_hashes)
 
+        # Cargar Candle Predictor v2 (NextCandleGRU multi-cabezal por intervalo)
+        self.candle_v2: Dict[str, CandleV2Runtime] = {}
+        self._load_candle_v2(verify_hashes=verify_hashes)
+
+    def _load_candle_v2(self, verify_hashes: bool = True) -> None:
+        c2_man_path = self.artifacts_dir / "candle_v2_manifest.json"
+        if not c2_man_path.exists():
+            return
+        try:
+            man = json.loads(c2_man_path.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        for tf in man.get("models", {}).keys():
+            try:
+                rt = CandleV2Runtime.from_manifest(
+                    self.artifacts_dir, interval=str(tf), verify_hashes=verify_hashes
+                )
+                self.candle_v2[str(tf).strip().lower()] = rt
+            except RuntimeError:
+                raise
+            except Exception:
+                continue
+
     def _load_quant_v2(self, verify_hashes: bool = True) -> None:
         v2_man_path = self.artifacts_dir / "quant_v2_manifest.json"
         if not v2_man_path.exists():
@@ -209,31 +240,38 @@ class QuantPredictor:
             self.xgb_1d = None
             self.xgb_1h = None
 
-    def _predict_batch_returns(
+    def _component_returns(
         self, feat_df: pd.DataFrame, interval: str = "1d"
-    ) -> tuple[np.ndarray, str]:
+    ) -> Dict[str, np.ndarray]:
+        """Calcula los retornos de los componentes legacy (`lstm_v1` y `xgb` si aplica)."""
         x_raw = feat_df[self.feature_columns].to_numpy(dtype=np.float32)
         x_scaled = self.scaler.transform(x_raw)
         seqs, _ = build_sequences(x_scaled, targets=None, seq_len=self.seq_len)
         with torch.no_grad():
             lstm_preds = self.model(torch.tensor(seqs, dtype=torch.float32)).numpy()
 
+        out: Dict[str, np.ndarray] = {"lstm_v1": lstm_preds.astype(float)}
         aligned = feat_df.iloc[self.seq_len - 1 :].reset_index(drop=True)
         atr_pcts = np.maximum(aligned["atr_pct"].to_numpy(dtype=np.float32), 1e-4)
 
         if interval == "1h" and self.xgb_1h is not None:
             x_enh = aligned[ENHANCED_FEATURE_COLUMNS].to_numpy(dtype=np.float32)
-            xgb_z = self.xgb_1h.predict(x_enh)
-            return (xgb_z * atr_pcts).astype(float), "quant_xgb_1h"
-
-        if interval == "1d" and self.xgb_1d is not None:
+            out["xgb"] = (self.xgb_1h.predict(x_enh) * atr_pcts).astype(float)
+        elif interval == "1d" and self.xgb_1d is not None:
             x_enh = aligned[ENHANCED_FEATURE_COLUMNS].to_numpy(dtype=np.float32)
-            xgb_z = self.xgb_1d.predict(x_enh)
-            xgb_rets = xgb_z * atr_pcts
-            blended = (0.65 * xgb_rets + 0.35 * lstm_preds).astype(float)
-            return blended, "ensemble_xgb1d_lstm"
+            out["xgb"] = (self.xgb_1d.predict(x_enh) * atr_pcts).astype(float)
+        return out
 
-        return lstm_preds.astype(float), self.model_version
+    def _predict_batch_returns(
+        self, feat_df: pd.DataFrame, interval: str = "1d"
+    ) -> tuple[np.ndarray, str]:
+        comps = self._component_returns(feat_df, interval=interval)
+        if interval == "1h" and "xgb" in comps:
+            return comps["xgb"], "quant_xgb_1h"
+        if interval == "1d" and "xgb" in comps:
+            blended = (0.65 * comps["xgb"] + 0.35 * comps["lstm_v1"]).astype(float)
+            return blended, "ensemble_xgb1d_lstm"
+        return comps["lstm_v1"], self.model_version
 
     def predict_from_candles(
         self, candles_df: pd.DataFrame, symbol: str, interval: str = "1d"
@@ -253,12 +291,59 @@ class QuantPredictor:
                 f"Filas válidas tras warmup ({len(feat_df)}) < seq_len ({self.seq_len})."
             )
 
-        preds, model_detail = self._predict_batch_returns(feat_df, interval=interval)
-        pred_val = float(preds[-1])
+        comps = self._component_returns(feat_df, interval=interval)
+        if interval == "1h" and "xgb" in comps:
+            pred_val = float(comps["xgb"][-1])
+            model_detail = "quant_xgb_1h"
+        elif interval == "1d" and "xgb" in comps:
+            pred_val = float(0.65 * comps["xgb"][-1] + 0.35 * comps["lstm_v1"][-1])
+            model_detail = "ensemble_xgb1d_lstm"
+        else:
+            pred_val = float(comps["lstm_v1"][-1])
+            model_detail = self.model_version
+
+        direction = "UP" if pred_val > 0 else ("DOWN" if pred_val < 0 else "FLAT")
+
+        pred_volatility_t1 = 0.0
+        candle_v2_return = 0.0
+        direction_probs: Dict[str, float] = {}
+        direction_confidence = 0.0
+        abstain = False
+        candle_v2_latent: List[float] = []
+        candle_v2_enabled = False
+
+        runtime = self.candle_v2.get(str(interval).strip().lower())
+        if runtime is not None:
+            try:
+                c2_out = runtime.predict(candles_df, symbol=symbol)
+            except Exception:
+                c2_out = None
+            if c2_out is not None:
+                pred_volatility_t1 = float(c2_out.pred_tr)
+                candle_v2_return = float(c2_out.pred_return)
+                direction_probs = dict(c2_out.probs)
+                direction_confidence = float(c2_out.direction_confidence)
+                abstain = bool(c2_out.abstain)
+                candle_v2_latent = list(c2_out.latent)
+                candle_v2_enabled = bool(c2_out.production_enabled)
+
+                if c2_out.production_enabled:
+                    w = float(c2_out.ensemble_weight)
+                    if "xgb" in comps:
+                        base_xgb = float(comps["xgb"][-1])
+                        pred_val = float((1.0 - w) * base_xgb + w * c2_out.pred_return)
+                        model_detail = f"ensemble_xgb{interval}_candlev2"
+                    else:
+                        pred_val = float(c2_out.pred_return)
+                        model_detail = f"candle_v2_{interval}"
+
+                    if c2_out.abstain:
+                        direction = "FLAT"
+                    else:
+                        direction = "UP" if pred_val > 0 else ("DOWN" if pred_val < 0 else "FLAT")
 
         last_row = feat_df.iloc[-1]
         close_time = str(last_row.get("close_time", last_row.get("timestamp", "")))
-        direction = "UP" if pred_val > 0 else ("DOWN" if pred_val < 0 else "FLAT")
 
         return PredictionResult(
             symbol=symbol,
@@ -276,6 +361,13 @@ class QuantPredictor:
             atr_pct=float(last_row.get("atr_pct", 0.015)),
             interval=interval,
             model_detail=model_detail,
+            pred_volatility_t1=pred_volatility_t1,
+            candle_v2_return=candle_v2_return,
+            direction_probs=direction_probs,
+            direction_confidence=direction_confidence,
+            abstain=abstain,
+            candle_v2_latent=candle_v2_latent,
+            candle_v2_enabled=candle_v2_enabled,
         )
 
     def predict_historical_series(

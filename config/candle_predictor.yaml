@@ -1,0 +1,41 @@
+# ==============================================================================
+# Configuración del Predictor Recurrente Multi-Ticker (Candle Predictor v2)
+# Control de complejidad estricto: seq_len en [16, 48], hidden_size en [48, 64],
+# num_layers en [1, 2].
+# ==============================================================================
+
+common:
+  cell: gru
+  dropout: 0.25
+  latent_dim: 16
+  lr: 0.001
+  weight_decay: 0.0001
+  batch_size: 256
+  n_folds: 4
+  te_frac: 0.15
+  loss_w_ret: 1.0
+  loss_w_tr: 0.5
+  loss_w_dir: 1.0
+  grad_clip: 1.0
+  seed: 42
+  ensemble_weight: 0.35
+  min_coverage: 0.02
+  conf_grid: [0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70]
+
+intervals:
+  1d:
+    cell: gru
+    seq_len: 24
+    hidden_size: 48
+    num_layers: 1
+    max_epochs: 60
+    patience: 8
+    threshold_bps: 25.0
+  1h:
+    cell: gru
+    seq_len: 48
+    hidden_size: 64
+    num_layers: 2
+    max_epochs: 30
+    patience: 6
+    threshold_bps: 15.0
