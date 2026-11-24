@@ -40,8 +40,11 @@ htmlcov/
 .tox/
 
 # ==============================================================================
-# Jupyter Notebooks
+# Datos temporales, históricos extendidos y artefactos piloto
 # ==============================================================================
+data/history/
+notebooks/artifacts/pilot/
+notebooks/artifacts/reports/
 .ipynb_checkpoints/
 notebooks/.ipynb_checkpoints/
 
