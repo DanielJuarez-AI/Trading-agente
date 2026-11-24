@@ -11,6 +11,7 @@ import threading
 import time
 import urllib.parse
 import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 import httpx
@@ -89,6 +90,7 @@ class NewsSentimentService:
         symbol: str,
         source_mode: str = "replay",
         fetch_live: bool = False,
+        force_refresh: bool = False,
     ) -> Dict[str, Any]:
         if source_mode == "replay" and not fetch_live:
             return {
@@ -98,15 +100,18 @@ class NewsSentimentService:
                 "sentiment_label": "NEUTRAL",
                 "catalysts": [],
                 "headlines": [],
+                "articles": [],
                 "headline_count": 0,
                 "high_impact_event": False,
+                "fetched_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             }
 
         now = time.monotonic()
-        with self._lock:
-            cached = self._cache.get(symbol)
-            if cached is not None and (now - cached[0]) < self.ttl_seconds:
-                return dict(cached[1])
+        if not force_refresh:
+            with self._lock:
+                cached = self._cache.get(symbol)
+                if cached is not None and (now - cached[0]) < self.ttl_seconds:
+                    return dict(cached[1])
 
         query = COMPANY_QUERY_HINTS.get(symbol, f"{symbol} stock")
         url = (
@@ -114,16 +119,34 @@ class NewsSentimentService:
             f"q={urllib.parse.quote(query)}&hl=en-US&gl=US&ceid=US:en"
         )
         headlines: List[str] = []
+        articles: List[Dict[str, Any]] = []
         source_tag = "google_news_rss"
         try:
-            with httpx.Client(timeout=2.5, follow_redirects=True) as client:
+            with httpx.Client(timeout=4.0, follow_redirects=True) as client:
                 resp = client.get(url)
                 resp.raise_for_status()
             root = ET.fromstring(resp.text)
-            for item in root.findall(".//item")[:5]:
+            for item in root.findall(".//item")[:8]:
                 title_el = item.find("title")
-                if title_el is not None and title_el.text:
-                    headlines.append(title_el.text.strip())
+                if title_el is None or not title_el.text:
+                    continue
+                title = title_el.text.strip()
+                link_el = item.find("link")
+                pub_el = item.find("pubDate")
+                src_el = item.find("source")
+                item_score = self.score_headlines([title])
+                headlines.append(title)
+                articles.append(
+                    {
+                        "title": title,
+                        "link": link_el.text.strip() if (link_el is not None and link_el.text) else "",
+                        "pub_date": pub_el.text.strip() if (pub_el is not None and pub_el.text) else "",
+                        "source": src_el.text.strip() if (src_el is not None and src_el.text) else "Google News",
+                        "sentiment_label": item_score["sentiment_label"],
+                        "sentiment_score": item_score["sentiment_score"],
+                        "catalysts": item_score["catalysts"],
+                    }
+                )
         except Exception:
             source_tag = "rss_unavailable_neutral"
 
@@ -134,9 +157,11 @@ class NewsSentimentService:
             "sentiment_score": scored["sentiment_score"],
             "sentiment_label": scored["sentiment_label"],
             "catalysts": scored["catalysts"],
-            "headlines": headlines[:4],
+            "headlines": headlines[:6],
+            "articles": articles,
             "headline_count": len(headlines),
             "high_impact_event": len(scored["catalysts"]) > 0,
+            "fetched_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
         with self._lock:
             self._cache[symbol] = (time.monotonic(), payload)
