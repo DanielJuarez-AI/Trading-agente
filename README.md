@@ -1,7 +1,7 @@
-# Quant Multi-Agent Trader (System-1 / System-2 Híbrido) — `v0.1.10`
+# Quant Multi-Agent Trader (System-1 / System-2 Híbrido) — `v0.1.18`
 
 > **Objetivo / Entrega:** `V.0.1` — Bot Cuantitativo Multi-Agente de Trading (Paper Trading)  
-> **Versión Actual:** **`v0.1.10`** *(generada automáticamente a partir de `10` commits en Git — formato `v0.1.<commits>`)*  
+> **Versión Actual:** **`v0.1.18`** *(generada automáticamente a partir de `18` commits en Git — formato `v0.1.<commits>`)*  
 > **Repositorio Git (Público):** [https://github.com/DanielJuarez-AI/Trading-agente](https://github.com/DanielJuarez-AI/Trading-agente)
 
 Plataforma cuantitativa multi-agente de grado terminal para trading algorítmico en modo **Paper Trading estricto** (`ENABLE_REAL_TRADING=false`, cero órdenes reales). Diseñada bajo separación institucional de **Front Office**, **Orquestador System-2**, **Middle Office** y **Back Office**, con soporte nativo para operación **Diaria (`1d` — 200 Días)** y **Horaria (`1h` — 200 Horas)**, sub-gráfica **RSI (14) Wilder**, persistencia atómica **SQLite WAL**, streaming **Server-Sent Events (SSE)** en tiempo real y compatibilidad optimizada para GPUs de **6 GB VRAM** (vía Ollama).
@@ -27,7 +27,7 @@ El sistema separa las inferencias rápidas locales (*System-1*) del razonamiento
 
 | Capa | Componente / Archivo | Ejecución | Modelo / Motor |
 | :--- | :--- | :--- | :--- |
-| **Front Office (Alpha)** | `backend/app/front_office/features.py` & `predictor.py` | Local (PyTorch / XGBoost) | **Quant v2**: XGBoost Walk-Forward (`quant_xgb_1d.joblib` + `quant_xgb_1h.joblib`) & LSTM T4 (`lstm_v1.pt`) |
+| **Front Office (Alpha)** | `backend/app/front_office/features.py`, `predictor.py` & `backend/app/ml/candle_predictor/` | Local (PyTorch / XGBoost) | **Quant v2 / Candle v2**: NextCandleGRU (`lstm_v2_1d.pt`, `lstm_v2_1h.pt`), XGBoost Walk-Forward & LSTM T4 (`lstm_v1.pt`) |
 | **Front Office (Contexto)** | `backend/app/front_office/news_sentiment.py` & `database.py` | Local | Google News RSS (catalizadores FOMC/SEC/Earnings) + **Memoria Episódica (FinMem)** |
 | **Front Office (Laya #1)** | `backend/app/front_office/laya_alpha.py` | Local (`LOCAL_DEVICE`) | Red DRL **Dueling Double-DQN + A2C** (`laya1_drl_v1.pt`) + fallback Ollama (`laya:latest`) |
 | **Orquestador (System-2)** | `backend/app/orchestrator/qwen_agent.py` | **Switch Dinámico** (`EXTERNAL_API` ↔ `LOCAL_DEVICE`) | API Externa (`qwen2.5-14b-instruct`) ↔ Local 6GB VRAM Ollama (`qwen2.5-3b-quant:latest`) |
@@ -137,4 +137,6 @@ python -m pytest -v backend/tests
 ## 5. Documentación Técnica Completa
 
 * **[docs/ARQUITECTURA_Y_AGENTES.md](docs/ARQUITECTURA_Y_AGENTES.md):** Diseño de las 3 oficinas + orquestador, matemáticas del predictor LSTM + XGBoost (`1d`/`1h`), DRL Dueling A2C, cálculo de RSI (14) y ATR (14), retroalimentación dinámica, memoria episódica FinMem y esquema SQLite WAL completo.
+* **[docs/CANDLE_PREDICTOR_V2.md](docs/CANDLE_PREDICTOR_V2.md):** Arquitectura recurrente multi-cabezal (`NextCandleGRU`), 26 variables causales adimensionales, Walk-Forward con embargo, calibración por temperatura, adaptador de 33 dimensiones para Laya #1 y métricas de producción.
+* **[docs/COMPARATIVA_ECOSISTEMA_QUANT.md](docs/COMPARATIVA_ECOSISTEMA_QUANT.md):** Comparativa técnica frente a `FinceptTerminal`, `awesome-quant` y `ML4T`, diagnóstico de bloqueos en `HOLD` y mejoras institucionales (PSR, DSR, VaR/CVaR, Half-Kelly, Cadena SHA-256 y Alpha Scanner).
 * **[docs/API_Y_OPERACION.md](docs/API_Y_OPERACION.md):** Manual de API REST y Server-Sent Events (SSE), autenticación por `X-API-Key` / cookie `HttpOnly`, guía de trading por horas (`1h`) vs días (`1d`), comparativa de 3 carriles y matriz de los 9 escenarios de error.
