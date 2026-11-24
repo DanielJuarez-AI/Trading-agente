@@ -90,6 +90,28 @@ class QwenOrchestratorAgent:
         }
         return key.lower() not in placeholders
 
+    def warmup_local_model(self) -> Dict[str, Any]:
+        """Precarga en VRAM el modelo local de Ollama sin bloquear el flujo principal."""
+        local_model = self.settings.qwen_local_model_name
+        if self.http_client is not None:
+            return {"warmed_up": False, "model": local_model}
+        url = f"{self.settings.ollama_base_url.rstrip('/')}/api/generate"
+        body = {
+            "model": local_model,
+            "prompt": "",
+            "keep_alive": "24h",
+            "stream": False,
+            "options": {"num_ctx": self.settings.qwen_local_num_ctx},
+        }
+        try:
+            with httpx.Client(timeout=httpx.Timeout(timeout=15.0, connect=0.35)) as client:
+                resp = client.post(url, json=body)
+                resp.raise_for_status()
+            self._last_local_unavailable_ts = None
+            return {"warmed_up": True, "model": local_model}
+        except Exception as exc:
+            return {"warmed_up": False, "model": local_model, "error": str(exc)[:160]}
+
     def _build_messages(
         self,
         prediction: PredictionResult,
@@ -562,10 +584,15 @@ class QwenOrchestratorAgent:
         prompt_summary = messages[1]["content"][:1200]
 
         # ======================================================================
-        # RAMA LOCAL <= 6 GB VRAM: Qwen 2.5 3B Real en Ollama Local
+        # RAMA LOCAL <= 6 GB VRAM: Qwen Local Real en Ollama (/api/chat)
         # ======================================================================
         if active_mode == "LOCAL_DEVICE":
-            local_endpoint = f"{self.settings.ollama_base_url.rstrip('/')}/v1/chat/completions"
+            use_ollama_native = self.http_client is None
+            local_endpoint = (
+                f"{self.settings.ollama_base_url.rstrip('/')}/api/chat"
+                if use_ollama_native
+                else f"{self.settings.ollama_base_url.rstrip('/')}/v1/chat/completions"
+            )
             local_model = self.settings.qwen_local_model_name
 
             if (
@@ -609,15 +636,30 @@ class QwenOrchestratorAgent:
                     episodic_memories=episodic_memories,
                 )
 
-            local_body = {
-                "model": local_model,
-                "temperature": self.settings.qwen_temperature,
-                "max_tokens": self.settings.qwen_max_tokens,
-                "keep_alive": "24h",
-                "response_format": {"type": "json_object"},
-                "options": {"num_ctx": self.settings.qwen_local_num_ctx},
-                "messages": messages,
-            }
+            if use_ollama_native:
+                local_body = {
+                    "model": local_model,
+                    "stream": False,
+                    "think": False,
+                    "format": "json",
+                    "keep_alive": "24h",
+                    "options": {
+                        "temperature": self.settings.qwen_temperature,
+                        "num_ctx": self.settings.qwen_local_num_ctx,
+                        "num_predict": self.settings.qwen_max_tokens,
+                    },
+                    "messages": messages,
+                }
+            else:
+                local_body = {
+                    "model": local_model,
+                    "temperature": self.settings.qwen_temperature,
+                    "max_tokens": self.settings.qwen_max_tokens,
+                    "keep_alive": "24h",
+                    "response_format": {"type": "json_object"},
+                    "options": {"num_ctx": self.settings.qwen_local_num_ctx},
+                    "messages": messages,
+                }
             owns_client = self.http_client is None
             client = self.http_client or httpx.Client(
                 timeout=httpx.Timeout(
@@ -630,7 +672,11 @@ class QwenOrchestratorAgent:
                 resp.raise_for_status()
                 self._last_local_unavailable_ts = None
                 payload = resp.json()
-                raw_llm = str(payload["choices"][0]["message"]["content"])
+                if isinstance(payload.get("message"), dict):
+                    raw_llm = str(payload["message"].get("content", ""))
+                else:
+                    msg = payload["choices"][0]["message"]
+                    raw_llm = str(msg.get("content") or msg.get("reasoning") or "")
                 normalized_content = (
                     self._normalize_local_json_content(
                         raw_content=raw_llm,

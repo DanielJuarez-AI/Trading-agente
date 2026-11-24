@@ -324,7 +324,7 @@ def test_qwen_mode_switch_local_6gb_and_external_api(
     app = create_app(settings_override=cfg)
 
     with TestClient(app) as client:
-        # Cambiar a Qwen Local 6GB VRAM (qwen2.5-3b-quant:latest)
+        # Cambiar a Qwen Local 6GB VRAM (qwen3:4b)
         sw_local = client.post(
             "/api/control/switch_qwen_mode",
             headers={"X-API-Key": cfg.gateway_api_key},
@@ -335,7 +335,7 @@ def test_qwen_mode_switch_local_6gb_and_external_api(
         assert body_local["qwen_mode"] == "LOCAL_DEVICE"
         assert body_local["topology"]["is_local_device"] is True
         assert body_local["topology"]["vram_budget_gb"] == 6.0
-        assert body_local["topology"]["model"] == "qwen2.5-3b-quant:latest"
+        assert body_local["topology"]["model"] == "qwen3:4b"
 
         st = client.get("/api/status").json()
         assert st["qwen_mode"] == "LOCAL_DEVICE"

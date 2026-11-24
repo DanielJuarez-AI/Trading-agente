@@ -200,7 +200,7 @@ class Settings:
                 "execution_mode": "LOCAL_DEVICE",
                 "is_local_device": True,
                 "location_label": f"DISPOSITIVO LOCAL (Ollama {self.qwen_local_vram_budget_gb:.0f}GB VRAM)",
-                "endpoint": f"{self.ollama_base_url.rstrip('/')}/v1/chat/completions",
+                "endpoint": f"{self.ollama_base_url.rstrip('/')}/api/chat",
                 "model": self.qwen_local_model_name,
                 "vram_budget_gb": self.qwen_local_vram_budget_gb,
                 "num_ctx": self.qwen_local_num_ctx,
@@ -294,7 +294,7 @@ def get_settings() -> Settings:
         ),
         qwen_local_model_name=os.getenv(
             "QWEN_LOCAL_MODEL_NAME",
-            str(qwen_local_yaml.get("model", "qwen2.5-3b-quant:latest")),
+            str(qwen_local_yaml.get("model", "qwen3:4b")),
         ),
         qwen_local_vram_budget_gb=float(
             os.getenv(
