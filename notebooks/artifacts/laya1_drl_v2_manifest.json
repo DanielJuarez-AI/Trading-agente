@@ -1,0 +1,59 @@
+{
+  "model_version": "laya1_drl_v2_candlev2_33d",
+  "algorithm": "Dueling Double-DQN + A2C + Regime Head (33D Candle v2 Latent State)",
+  "weights_file": "laya1_drl_v2.pt",
+  "sha256": "1160db52a0b1af4c95f3837e108783c9302272fc6dae52f1d042eed387d01da5",
+  "architecture": {
+    "class": "Laya1DRLPolicyNet",
+    "state_dim": 33,
+    "hidden_dim": 64,
+    "actions": [
+      "BUY",
+      "HOLD",
+      "SELL"
+    ],
+    "regimes": [
+      "bull_trend",
+      "bear_trend",
+      "sideways",
+      "high_vol_chop",
+      "none"
+    ]
+  },
+  "hyperparameters": {
+    "gamma": 0.95,
+    "tau": 0.05,
+    "lr": 0.0012,
+    "weight_decay": 0.005,
+    "slippage": 0.0005,
+    "seed": 42,
+    "epochs_max": 45
+  },
+  "calibration_temperature": 1.5,
+  "splits_sizes": {
+    "TR": 18360,
+    "VA": 3840,
+    "TE": 3720
+  },
+  "metrics": {
+    "TR": {
+      "mean_step_return_bps": 2.1822,
+      "sharpe_step": 0.0134,
+      "regime_accuracy": 0.693,
+      "action_rate": 0.4992
+    },
+    "VA": {
+      "mean_step_return_bps": -4.7414,
+      "sharpe_step": -0.0301,
+      "regime_accuracy": 0.7367,
+      "action_rate": 0.4992
+    },
+    "TE": {
+      "mean_step_return_bps": -12.5336,
+      "sharpe_step": -0.0676,
+      "regime_accuracy": 0.6333,
+      "action_rate": 0.4997
+    }
+  },
+  "generated_at_utc": "2026-11-23T22:14:15Z"
+}

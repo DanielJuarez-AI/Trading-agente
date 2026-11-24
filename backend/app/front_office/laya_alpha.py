@@ -169,6 +169,7 @@ class LayaAlphaAgent:
         self._last_unavailable_ts: Optional[float] = None
         self.artifacts_dir = artifacts_dir or ARTIFACTS_DIR
         self.drl_net: Optional[Laya1DRLPolicyNet] = None
+        self.drl_state_dim: int = DRL_STATE_DIM
         self.drl_temperature: float = 1.0
         self.drl_model_tag: str = "laya1_drl_v1"
         self.conviction_bias: float = 0.0
@@ -202,22 +203,38 @@ class LayaAlphaAgent:
         return applied
 
     def _load_drl_model(self) -> None:
-        weights_path = self.artifacts_dir / "laya1_drl_v1.pt"
-        manifest_path = self.artifacts_dir / "laya1_drl_manifest.json"
+        v2_weights = self.artifacts_dir / "laya1_drl_v2.pt"
+        v2_manifest = self.artifacts_dir / "laya1_drl_v2_manifest.json"
+        if v2_weights.exists() and v2_manifest.exists():
+            weights_path, manifest_path = v2_weights, v2_manifest
+        else:
+            weights_path = self.artifacts_dir / "laya1_drl_v1.pt"
+            manifest_path = self.artifacts_dir / "laya1_drl_manifest.json"
         if not weights_path.exists():
             return
         try:
             hidden_dim = 64
+            state_dim = DRL_STATE_DIM
             if manifest_path.exists():
                 man = json.loads(manifest_path.read_text(encoding="utf-8"))
-                hidden_dim = int(man.get("architecture", {}).get("hidden_dim", 64))
+                expected_sha = man.get("sha256")
+                if expected_sha:
+                    from backend.app.front_office.predictor import compute_sha256
+                    if compute_sha256(weights_path) != str(expected_sha):
+                        raise RuntimeError(f"Hash SHA-256 inválido para {weights_path.name}")
+                arch = man.get("architecture", {})
+                hidden_dim = int(arch.get("hidden_dim", 64))
+                state_dim = int(arch.get("state_dim", DRL_STATE_DIM))
                 self.drl_temperature = float(man.get("calibration_temperature", 1.0))
-                self.drl_model_tag = str(man.get("model_version", "laya1_drl_v1"))
-            net = Laya1DRLPolicyNet(state_dim=DRL_STATE_DIM, hidden_dim=hidden_dim)
+                self.drl_model_tag = str(man.get("model_version", weights_path.stem))
+            self.drl_state_dim = state_dim
+            net = Laya1DRLPolicyNet(state_dim=state_dim, hidden_dim=hidden_dim)
             state_dict = torch.load(weights_path, map_location="cpu", weights_only=True)
             net.load_state_dict(state_dict)
             net.eval()
             self.drl_net = net
+        except RuntimeError:
+            raise
         except Exception:
             self.drl_net = None
 
@@ -274,6 +291,15 @@ class LayaAlphaAgent:
                 momentum_5=prediction.momentum_5,
                 position_open=position_open,
             )
+            if self.drl_state_dim != DRL_STATE_DIM:
+                from backend.app.ml.candle_predictor.laya_adapter import (
+                    extend_state_with_candle_v2,
+                )
+
+                latent_dim = max(0, self.drl_state_dim - 17)
+                state_vec = extend_state_with_candle_v2(
+                    state_vec, prediction, latent_dim=latent_dim
+                )
             state_t = torch.tensor(state_vec, dtype=torch.float32).unsqueeze(0)
             with torch.no_grad():
                 q_vals, policy_logits, regime_logits, _ = self.drl_net(state_t)
@@ -334,9 +360,24 @@ class LayaAlphaAgent:
             else:
                 conv_level = "very_low"
 
-            vol_scale = float(np.clip(0.018 / max(prediction.vol_20, 0.005), 0.35, 1.0))
+            from backend.app.core.quant_metrics import fractional_kelly_allocation
+
             max_single = float(getattr(self.settings, "max_single_position_pct", 0.45))
-            rec_exp = float(np.clip(max_single * vol_scale * conv_score * 1.35, 0.12, max_single))
+            p_win = max(
+                float(sig_probs.get("BUY", 0.5)),
+                float((prediction.direction_probs or {}).get("UP", 0.5)),
+            )
+            # Modular ligeramente p_win con la convicción calibrada del DRL
+            p_eff = float(np.clip(0.55 * p_win + 0.45 * conv_score, 0.40, 0.92))
+            rec_exp = fractional_kelly_allocation(
+                p_win=p_eff,
+                payoff_ratio=1.75,
+                kelly_fraction=0.5,
+                vol_20=float(prediction.vol_20),
+                target_vol=0.018,
+                min_alloc=0.12,
+                max_alloc=max_single,
+            )
             q_dict = {
                 act: round(float(q_vals[0, i].item()), 4)
                 for i, act in enumerate(DRL_ACTIONS)

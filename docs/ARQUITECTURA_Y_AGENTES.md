@@ -49,11 +49,13 @@ Todas las variables se calculan de forma **strictly causal** (cero `bfill`, cero
 Soporta las dos temporalidades oficiales de operación con verificación obligatoria **SHA-256** antes de cargar cualquier artefacto en `notebooks/artifacts/`:
 
 1. **Temporalidad Horaria (`interval="1h"`):**
-   * Usa el modelo especializado **`quant_xgb_1h.joblib`** (`model_detail="quant_xgb_1h"`), reescalado desde unidades $z$ a retorno esperado: $\hat{r}_{t+1} = z_{\text{XGB}} \cdot \text{atr\_pct}$.
+   * Usa el modelo especializado **`quant_xgb_1h.joblib`** (`model_detail="quant_xgb_1h"`), o el ensamble híbrido con Candle Predictor v2 (`NextCandleGRU`, `lstm_v2_1h.pt`) cuando está habilitado (`model_detail="ensemble_xgb1h_candlev2"`).
 2. **Temporalidad Diaria (`interval="1d"`):**
-   * Combina en ensamble **`quant_xgb_1d.joblib`** + **`lstm_v1.pt`** (con **`scaler_v1.joblib`**):
-     $$\hat{r}_{t+1} = 0.65 \cdot r_{\text{XGB, 1d}} + 0.35 \cdot r_{\text{LSTM}}$$
-     (`model_detail="ensemble_xgb1d_lstm"`). Si no existe `quant_xgb_1d.joblib`, cae ordenadamente a `lstm_v1`.
+   * Combina en ensamble **`quant_xgb_1d.joblib`** + **`lstm_v1.pt`** o **`lstm_v2_1d.pt`** (Candle Predictor v2 `NextCandleGRU` multi-cabezal):
+     $$\hat{r}_{t+1} = 0.65 \cdot r_{\text{XGB, 1d}} + 0.35 \cdot r_{\text{Candle\_v2}}$$
+     (`model_detail="ensemble_xgb1d_candlev2"`). Si no se activa v2, cae ordenadamente al ensamble con `lstm_v1.pt` (`model_detail="ensemble_xgb1d_lstm"`).
+3. **Candle Predictor v2 (`backend/app/ml/candle_predictor/`):**
+   * Red multi-cabezal con 26 variables causales adimensionales, Walk-Forward con embargo, calibración por Temperature Scaling y abstención explícita (`HOLD`) en baja confianza. Ver documentación técnica detallada en [docs/CANDLE_PREDICTOR_V2.md](CANDLE_PREDICTOR_V2.md).
 3. **Serie Histórica Causal (`predict_historical_series`):**
    * Permite calcular pares históricos $(t \to t+1)$ sobre las últimas $N$ velas para auditoría visual sin data leakage.
 
@@ -66,7 +68,8 @@ Soporta las dos temporalidades oficiales de operación con verificación obligat
 ### 2.4 Front Office — Agente Laya #1 (`backend/app/front_office/laya_alpha.py`)
 Ejecutado 100% en dispositivo local (`LAYA1_EXECUTION_MODE="LOCAL_DEVICE"`):
 * **Arquitectura DRL (`Laya1DRLPolicyNet`):**
-  * Vector de estado de **10 dimensiones** (`DRL_STATE_DIM=10`): $\hat{r}_{t+1}$, `ret_lag_1`, `ema_ratio`, `vol_20`, `rsi_14`, `momentum_5`, `position_open`, raíz cuadrada con signo de $\hat{r}$, ratio $\hat{r}/\sigma_{20}$ (Sharpe-like) y signo de tendencia.
+  * Vector de estado base de **10 dimensiones** (`DRL_STATE_DIM=10`): $\hat{r}_{t+1}$, `ret_lag_1`, `ema_ratio`, `vol_20`, `rsi_14`, `momentum_5`, `position_open`, raíz cuadrada con signo de $\hat{r}$, ratio $\hat{r}/\sigma_{20}$ (Sharpe-like) y signo de tendencia.
+  * **Soporte Extendido Candle v2 (33 dimensiones):** cuando se activa Candle Predictor v2, `extend_state_with_candle_v2` incorpora 7 señales calibradas (retorno, volatilidad, probabilidades $P(\text{DOWN}), P(\text{NEUTRAL}), P(\text{UP})$, edge y abstención) más 16 dimensiones del vector latente $h_t$ de `NextCandleGRU`, manteniendo retrocompatibilidad con la red de 10 dimensiones hasta su reentrenamiento.
   * Red neuronal **Dueling Double-DQN + A2C** (`laya1_drl_v1.pt`) con cabezas paralelas para:
     * **Valor & Ventaja ($Q(s, a)$)** sobre acciones `["BUY", "HOLD", "SELL"]`.
     * **Política Actor ($P(a \mid s)$)** modulada por la temperatura $\tau$ calibrada en tiempo real por Qwen (`applied_drl_temperature`).

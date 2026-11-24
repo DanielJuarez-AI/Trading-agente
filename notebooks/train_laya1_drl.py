@@ -1,13 +1,13 @@
 """
-Entrenamiento Deep Reinforcement Learning (Dueling Double-DQN + A2C + Regime Head)
-para Laya #1 (Front Office Alpha & Regime Triage).
+Entrenamiento Deep Reinforcement Learning v2 (Dueling Double-DQN + A2C + Regime Head)
+para Laya #1 sobre vector extendido de 33 dimensiones (`extend_state_with_candle_v2`).
 
-Mejoras Quant v2:
-- Transiciones multi-temporalidad (1d + 1h) con predicciones ATR-normalizadas de QuantPredictor.
-- Mayor regularización L2 (weight_decay=5e-3) y penalización por turnover (0.0012) para reducir churning.
-- Early Stopping sobre Sharpe de VA + Regime Accuracy, y calibración de temperatura en VA.
-- Evaluación final única en TE.
-- Exporta `notebooks/artifacts/laya1_drl_v1.pt` y `laya1_drl_manifest.json`.
+Características:
+- Consuma las señales calibradas y el embedding latente h_t de Candle Predictor v2 (`NextCandleGRU`).
+- Transiciones multi-temporalidad (1d + 1h) cronológicas sin mezcla entre tickers (`TR 70% / VA 15% / TE 15%`).
+- Recompensas balanceadas descontando costos reales (5 bps slippage) sin sesgo degenerado a HOLD.
+- Exporta `notebooks/artifacts/laya1_drl_v2.pt` y `laya1_drl_v2_manifest.json`
+  (conservando intacto `laya1_drl_v1.pt` para retrocompatibilidad).
 """
 
 from __future__ import annotations
@@ -28,18 +28,21 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from backend.app.core.config import ARTIFACTS_DIR, DATA_DIR, PRIMARY_TICKERS
-from backend.app.front_office.features import (
-    DEFAULT_SEQ_LEN,
-    compute_technical_features,
-)
+from backend.app.front_office.features import DEFAULT_SEQ_LEN, compute_technical_features
 from backend.app.front_office.laya_alpha import (
     DRL_ACTIONS,
     DRL_REGIMES,
-    DRL_STATE_DIM,
     Laya1DRLPolicyNet,
     build_drl_state_vector,
 )
 from backend.app.front_office.predictor import QuantPredictor, compute_sha256
+from backend.app.ml.candle_predictor.laya_adapter import (
+    extend_state_with_candle_v2,
+    laya_state_dim_v2,
+)
+
+LATENT_DIM: int = 16
+V2_STATE_DIM: int = laya_state_dim_v2(LATENT_DIM)  # 33
 
 
 def _label_regime(ema_ratio: float, vol_20: float, ret_t1: float) -> int:
@@ -52,20 +55,46 @@ def _label_regime(ema_ratio: float, vol_20: float, ret_t1: float) -> int:
     return DRL_REGIMES.index("sideways")
 
 
+def _make_v2_state_from_row(
+    legacy_vec: np.ndarray,
+    c2_ret: float,
+    c2_tr: float,
+    c2_probs: np.ndarray,
+    c2_abstain: bool,
+    c2_latent: np.ndarray,
+    atr_pct: float,
+) -> np.ndarray:
+    has_c2 = bool(np.isfinite(c2_ret)) and bool(np.isfinite(c2_probs).all()) and bool(np.isfinite(c2_latent).all())
+    if not has_c2:
+        pred_dict: Dict[str, Any] = {}
+    else:
+        pred_dict = {
+            "candle_v2_return": float(c2_ret),
+            "pred_volatility_t1": float(c2_tr) if np.isfinite(c2_tr) else float(atr_pct),
+            "atr_pct": float(atr_pct),
+            "direction_probs": {
+                "DOWN": float(c2_probs[0]),
+                "NEUTRAL": float(c2_probs[1]),
+                "UP": float(c2_probs[2]),
+            },
+            "abstain": bool(c2_abstain),
+            "candle_v2_latent": c2_latent.tolist(),
+        }
+    return extend_state_with_candle_v2(legacy_vec, pred_dict, latent_dim=LATENT_DIM)
+
+
 def build_drl_transitions(
     predictor: QuantPredictor,
     caches_by_interval: Dict[str, Dict[str, List[Dict[str, Any]]]],
 ) -> Dict[str, Dict[str, np.ndarray]]:
-    """
-    Construye transiciones MDP multi-temporalidad (1d + 1h) en splits temporales
-    estrictos TR (70%), VA (15%) y TE (15%).
-    """
+    """Construye transiciones MDP multi-temporalidad (33 dims) sin cruce de fronteras."""
     split_data: Dict[str, Dict[str, List[Any]]] = {
         k: {"s": [], "s_next": [], "rewards": [], "reg": [], "real_ret": [], "pos_flag": []}
         for k in ("TR", "VA", "TE")
     }
 
     for interval, replay_cache in caches_by_interval.items():
+        c2_rt = predictor.candle_v2.get(interval)
         for ticker in PRIMARY_TICKERS:
             if ticker not in replay_cache:
                 continue
@@ -77,6 +106,32 @@ def build_drl_transitions(
 
             preds, _ = predictor._predict_batch_returns(sup_df, interval=interval)
             aligned = sup_df.iloc[DEFAULT_SEQ_LEN - 1 :].reset_index(drop=True)
+
+            # Obtener predicciones batch de Candle Predictor v2 alineadas por close_time
+            c2_by_idx: List[tuple[float, float, np.ndarray, bool, np.ndarray]] = []
+            if c2_rt is not None:
+                c2_batch = c2_rt.predict_batch(df, symbol=ticker)
+                c2_map_pos: Dict[str, int] = {}
+                time_col = "close_time" if "close_time" in df.columns else "open_time"
+                for k_i in range(len(df)):
+                    c2_map_pos[str(df.iloc[k_i][time_col])] = k_i
+                for row_i in range(len(aligned)):
+                    ct = str(aligned.iloc[row_i].get("close_time", aligned.iloc[row_i].get("open_time", "")))
+                    orig_i = c2_map_pos.get(ct)
+                    if orig_i is None:
+                        c2_by_idx.append((np.nan, np.nan, np.full(3, np.nan), True, np.full(LATENT_DIM, np.nan)))
+                    else:
+                        c2_by_idx.append((
+                            float(c2_batch["pred_return"][orig_i]),
+                            float(c2_batch["pred_tr"][orig_i]),
+                            c2_batch["probs"][orig_i],
+                            bool(c2_batch["abstain"][orig_i]),
+                            c2_batch["latent"][orig_i],
+                        ))
+            else:
+                for _ in range(len(aligned)):
+                    c2_by_idx.append((np.nan, np.nan, np.full(3, np.nan), True, np.full(LATENT_DIM, np.nan)))
+
             n = len(aligned)
             n_tr = int(n * 0.70)
             n_va = int(n * 0.15)
@@ -94,9 +149,12 @@ def build_drl_transitions(
                     atr_pct = max(float(row.get("atr_pct", vol)), 1e-4)
                     scale = atr_pct if interval == "1h" else max(vol, atr_pct)
 
+                    pred_cur = float(c2_by_idx[idx][0]) if np.isfinite(c2_by_idx[idx][0]) else float(preds[idx])
+                    pred_nxt = float(c2_by_idx[idx + 1][0]) if np.isfinite(c2_by_idx[idx + 1][0]) else float(preds[idx + 1])
+
                     for pos_open in (False, True):
-                        s = build_drl_state_vector(
-                            pred_return_t1=float(preds[idx]),
+                        s_leg = build_drl_state_vector(
+                            pred_return_t1=pred_cur,
                             ret_lag_1=float(row["ret_lag_1"]),
                             ema_ratio=float(row["ema_ratio"]),
                             vol_20=vol,
@@ -104,8 +162,10 @@ def build_drl_transitions(
                             momentum_5=float(row["momentum_5"]),
                             position_open=pos_open,
                         )
-                        s_next = build_drl_state_vector(
-                            pred_return_t1=float(preds[idx + 1]),
+                        s = _make_v2_state_from_row(s_leg, *c2_by_idx[idx], atr_pct=atr_pct)
+
+                        s_next_leg = build_drl_state_vector(
+                            pred_return_t1=pred_nxt,
                             ret_lag_1=float(nxt["ret_lag_1"]),
                             ema_ratio=float(nxt["ema_ratio"]),
                             vol_20=max(float(nxt["vol_20"]), 1e-4),
@@ -113,19 +173,19 @@ def build_drl_transitions(
                             momentum_5=float(nxt["momentum_5"]),
                             position_open=pos_open,
                         )
+                        nxt_atr = max(float(nxt.get("atr_pct", nxt["vol_20"])), 1e-4)
+                        s_next = _make_v2_state_from_row(s_next_leg, *c2_by_idx[idx + 1], atr_pct=nxt_atr)
 
-                        # Penalización por turnover (0.0012) + slippage (0.0005) + riesgo bajista
-                        turnover_cost = 0.0012 + 0.0005
-                        downside_pen = 0.45 * max(0.0, -real_r)
-                        vol_pen = 0.10 * scale
+                        slippage = 0.0005
+                        downside_pen = 0.25 * max(0.0, -real_r)
                         if not pos_open:
-                            r_buy = ((real_r - turnover_cost - downside_pen - vol_pen) / scale) * 0.5
-                            r_hold = (-0.10 * max(0.0, real_r - 0.003) / scale) * 0.5
+                            r_buy = ((real_r - slippage - downside_pen) / scale) * 0.65
+                            r_hold = (-0.25 * max(0.0, real_r - 0.002) / scale) * 0.65
                             r_sell = -2.0
                         else:
                             r_buy = -1.5
-                            r_hold = ((real_r - downside_pen) / scale) * 0.5
-                            r_sell = ((-real_r - turnover_cost) / scale) * 0.5
+                            r_hold = ((real_r - downside_pen) / scale) * 0.65
+                            r_sell = ((-real_r - slippage) / scale) * 0.65
 
                         split_data[split_name]["s"].append(s)
                         split_data[split_name]["s_next"].append(s_next)
@@ -165,16 +225,19 @@ def evaluate_drl_split(
         reg_acc = float((reg_pred == reg_y).float().mean().item())
 
     step_returns: List[float] = []
+    n_trades = 0
     for i in range(len(s_t)):
         pos_open = pos_flags[i] > 0.5
         valid = [1] + ([2] if pos_open else [0])
         best_a = max(valid, key=lambda idx: float(probs[i, idx]) + 0.15 * float(q_vals[i, idx].item()))
-        if best_a == 0:  # BUY
-            step_returns.append(float(real_rets[i]) - 0.0012)
-        elif best_a == 1 and pos_open:  # HOLD con posición
+        if best_a == 0:
+            step_returns.append(float(real_rets[i]) - 0.0005)
+            n_trades += 1
+        elif best_a == 1 and pos_open:
             step_returns.append(float(real_rets[i]))
-        elif best_a == 2:  # SELL
-            step_returns.append(-0.0012)
+        elif best_a == 2:
+            step_returns.append(-0.0005)
+            n_trades += 1
         else:
             step_returns.append(0.0)
 
@@ -186,6 +249,7 @@ def evaluate_drl_split(
         "mean_step_return_bps": round(mean_ret * 10000.0, 4),
         "sharpe_step": round(sharpe_step, 4),
         "regime_accuracy": round(reg_acc, 4),
+        "action_rate": round(float(n_trades / max(len(s_t), 1)), 4),
     }
 
 
@@ -204,10 +268,10 @@ def train_laya1_drl(seed: int = 42, epochs: int = 45) -> None:
     predictor = QuantPredictor(verify_hashes=True)
     splits = build_drl_transitions(predictor, caches)
     tr, va, te = splits["TR"], splits["VA"], splits["TE"]
-    print(f"Transiciones DRL Multi-TF -> TR: {len(tr['s'])}, VA: {len(va['s'])}, TE: {len(te['s'])}")
+    print(f"Transiciones DRL v2 (33 dims) -> TR: {len(tr['s'])}, VA: {len(va['s'])}, TE: {len(te['s'])}")
 
-    online_net = Laya1DRLPolicyNet(state_dim=DRL_STATE_DIM, hidden_dim=64)
-    target_net = Laya1DRLPolicyNet(state_dim=DRL_STATE_DIM, hidden_dim=64)
+    online_net = Laya1DRLPolicyNet(state_dim=V2_STATE_DIM, hidden_dim=64)
+    target_net = Laya1DRLPolicyNet(state_dim=V2_STATE_DIM, hidden_dim=64)
     target_net.load_state_dict(online_net.state_dict())
     target_net.eval()
 
@@ -261,7 +325,7 @@ def train_laya1_drl(seed: int = 42, epochs: int = 45) -> None:
             entropy = -(probs * log_probs).sum(dim=-1).mean()
             regime_loss = F.cross_entropy(reg_logits, reg_b)
 
-            loss = dqn_loss + 0.65 * actor_loss + 0.50 * regime_loss - 0.025 * entropy
+            loss = dqn_loss + 0.65 * actor_loss + 0.50 * regime_loss - 0.03 * entropy
             optimizer.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(online_net.parameters(), 1.0)
@@ -301,17 +365,17 @@ def train_laya1_drl(seed: int = 42, epochs: int = 45) -> None:
     va_final = evaluate_drl_split(online_net, va)
     te_final = evaluate_drl_split(online_net, te)
 
-    weights_path = ARTIFACTS_DIR / "laya1_drl_v1.pt"
+    weights_path = ARTIFACTS_DIR / "laya1_drl_v2.pt"
     torch.save(online_net.state_dict(), weights_path)
 
     manifest = {
-        "model_version": "laya1_drl_v2_multitf",
-        "algorithm": "Dueling Double-DQN + Advantage Actor-Critic (A2C) + Regime Head (Multi-TF ATR)",
-        "weights_file": "laya1_drl_v1.pt",
+        "model_version": "laya1_drl_v2_candlev2_33d",
+        "algorithm": "Dueling Double-DQN + A2C + Regime Head (33D Candle v2 Latent State)",
+        "weights_file": "laya1_drl_v2.pt",
         "sha256": compute_sha256(weights_path),
         "architecture": {
             "class": "Laya1DRLPolicyNet",
-            "state_dim": DRL_STATE_DIM,
+            "state_dim": V2_STATE_DIM,
             "hidden_dim": 64,
             "actions": DRL_ACTIONS,
             "regimes": DRL_REGIMES,
@@ -321,7 +385,7 @@ def train_laya1_drl(seed: int = 42, epochs: int = 45) -> None:
             "tau": tau,
             "lr": 1.2e-3,
             "weight_decay": 5e-3,
-            "turnover_penalty": 0.0012,
+            "slippage": 0.0005,
             "seed": seed,
             "epochs_max": epochs,
         },
@@ -330,10 +394,10 @@ def train_laya1_drl(seed: int = 42, epochs: int = 45) -> None:
         "metrics": {"TR": tr_final, "VA": va_final, "TE": te_final},
         "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
-    (ARTIFACTS_DIR / "laya1_drl_manifest.json").write_text(
+    (ARTIFACTS_DIR / "laya1_drl_v2_manifest.json").write_text(
         json.dumps(manifest, indent=2), encoding="utf-8"
     )
-    print("Entrenamiento DRL de Laya #1 completado exitosamente.")
+    print("Entrenamiento DRL v2 (33D) de Laya #1 completado exitosamente.")
     print(json.dumps(manifest["metrics"], indent=2))
 
 
