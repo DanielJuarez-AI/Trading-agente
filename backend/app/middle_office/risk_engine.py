@@ -10,11 +10,97 @@ Incluye protección determinista Stop-Loss ATR, Trailing Stop y Take-Profit.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
 from backend.app.back_office.database import TradingDatabase
 from backend.app.back_office.paper_engine import PortfolioState, floor_to_step
 from backend.app.core.config import Settings
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:  # pragma: no cover
+    ZoneInfo = None  # type: ignore[assignment]
+
+
+_US_NYSE_HOLIDAYS = {
+    # 2025-2027 principales feriados NYSE/NASDAQ (YYYY-MM-DD)
+    "2025-01-01", "2025-01-20", "2025-02-17", "2025-04-18", "2025-05-26",
+    "2025-06-19", "2025-07-04", "2025-09-01", "2025-11-27", "2025-12-25",
+    "2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03", "2026-05-25",
+    "2026-06-19", "2026-07-03", "2026-09-07", "2026-11-26", "2026-12-25",
+    "2027-01-01", "2027-01-18", "2027-02-15", "2027-03-26", "2027-05-31",
+    "2027-06-18", "2027-07-05", "2027-09-06", "2027-11-25", "2027-12-24",
+}
+
+
+def _to_us_eastern(utc_dt: datetime) -> datetime:
+    dt_utc = utc_dt.astimezone(timezone.utc) if utc_dt.tzinfo else utc_dt.replace(tzinfo=timezone.utc)
+    if ZoneInfo is not None:
+        try:
+            return dt_utc.astimezone(ZoneInfo("America/New_York"))
+        except Exception:
+            pass
+    year = dt_utc.year
+    # 2do domingo de marzo 07:00 UTC -> inicio EDT (UTC-4)
+    mar1 = datetime(year, 3, 1, 7, 0, tzinfo=timezone.utc)
+    dst_start = mar1 + timedelta(days=(6 - mar1.weekday()) % 7 + 7)
+    # 1er domingo de noviembre 06:00 UTC -> fin EDT (UTC-5)
+    nov1 = datetime(year, 11, 1, 6, 0, tzinfo=timezone.utc)
+    dst_end = nov1 + timedelta(days=(6 - nov1.weekday()) % 7)
+    offset = -4 if dst_start <= dt_utc < dst_end else -5
+    return dt_utc.astimezone(timezone(timedelta(hours=offset)))
+
+
+def get_market_session_status(
+    symbol: str, now_utc: Optional[datetime] = None
+) -> Dict[str, Any]:
+    """Determina si el mercado del símbolo está abierto para operar."""
+    sym = str(symbol or "").upper()
+    if sym in {"BTC-USD", "BTCUSDT"}:
+        return {
+            "symbol": sym,
+            "is_open": True,
+            "market": "CRYPTO_24_7",
+            "et_time": _to_us_eastern(now_utc or datetime.now(timezone.utc)).strftime("%Y-%m-%d %H:%M ET"),
+            "session_label": "ABIERTO 24/7 (MEXC Spot)",
+            "reason": "Mercado cripto operativo las 24 horas.",
+        }
+
+    et_dt = _to_us_eastern(now_utc or datetime.now(timezone.utc))
+    et_str = et_dt.strftime("%Y-%m-%d %H:%M ET")
+    date_str = et_dt.strftime("%Y-%m-%d")
+
+    if et_dt.weekday() >= 5 or date_str in _US_NYSE_HOLIDAYS:
+        return {
+            "symbol": sym,
+            "is_open": False,
+            "market": "US_EQUITIES",
+            "et_time": et_str,
+            "session_label": f"CERRADO (Fin de semana/Feriado • {et_str})",
+            "reason": f"Bolsa NYSE/NASDAQ cerrada ({et_str}).",
+        }
+
+    mins = et_dt.hour * 60 + et_dt.minute
+    if 570 <= mins < 960:  # 09:30 <= t < 16:00 ET
+        return {
+            "symbol": sym,
+            "is_open": True,
+            "market": "US_EQUITIES",
+            "et_time": et_str,
+            "session_label": f"ABIERTO NYSE/NASDAQ ({et_str})",
+            "reason": f"Sesión regular activa ({et_str}).",
+        }
+
+    phase = "Pre-Market" if mins < 570 else "After-Hours"
+    return {
+        "symbol": sym,
+        "is_open": False,
+        "market": "US_EQUITIES",
+        "et_time": et_str,
+        "session_label": f"CERRADO ({phase} • {et_str} | Horario 09:30–16:00 ET)",
+        "reason": f"Mercado regular cerrado ({phase}, {et_str}). Horario operativo: 09:30–16:00 ET.",
+    }
 
 
 @dataclass(frozen=True)
@@ -54,6 +140,8 @@ class DeterministicRiskEngine:
         atr_14: Optional[float] = None,
         candle_low: Optional[float] = None,
         candle_high: Optional[float] = None,
+        source_mode: str = "replay",
+        now_utc: Optional[datetime] = None,
     ) -> RiskVerdict:
         """
         Valida todas las restricciones duras de riesgo antes de liquidar en Paper.
@@ -102,6 +190,32 @@ class DeterministicRiskEngine:
                 reason=f"Símbolo {symbol} fuera de la lista blanca oficial.",
                 rule_triggered="WHITELIST_SYMBOL",
             )
+
+        # 1a. Horario de mercado (en modo 'live' bloquea acciones si NYSE/NASDAQ está cerrado)
+        if source_mode == "live":
+            mkt_status = get_market_session_status(symbol, now_utc=now_utc)
+            if not mkt_status["is_open"]:
+                if proposed_action in {"BUY", "SELL"}:
+                    self._db.log_error(
+                        error_code="RISK_MARKET_CLOSED",
+                        component="DeterministicRiskEngine",
+                        message=f"Operación {proposed_action} bloqueada en {symbol}: {mkt_status['session_label']}",
+                        payload_excerpt=f"symbol={symbol}, et_time={mkt_status['et_time']}",
+                    )
+                    return RiskVerdict(
+                        approved=False,
+                        status="REJECTED",
+                        final_action="HOLD",
+                        reason=f"Mercado cerrado para {symbol}: {mkt_status['session_label']}.",
+                        rule_triggered="MARKET_CLOSED",
+                    )
+                return RiskVerdict(
+                    approved=True,
+                    status="APPROVED",
+                    final_action="HOLD",
+                    reason=f"Mercado cerrado ({mkt_status['session_label']}): posición en espera sin operar.",
+                    rule_triggered="MARKET_CLOSED",
+                )
 
         # 1b. Salidas Protectoras Deterministas (Stop-Loss / Trailing Stop / Take-Profit)
         has_open_pos = portfolio.position_qty >= self._settings.min_lot_size

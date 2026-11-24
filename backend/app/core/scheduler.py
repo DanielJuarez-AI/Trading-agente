@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
@@ -40,7 +41,10 @@ from backend.app.front_office.laya_alpha import (
 from backend.app.front_office.news_sentiment import NewsSentimentService
 from backend.app.front_office.predictor import QuantPredictor
 from backend.app.middle_office.laya_guard import LayaGuardAgent
-from backend.app.middle_office.risk_engine import DeterministicRiskEngine
+from backend.app.middle_office.risk_engine import (
+    DeterministicRiskEngine,
+    get_market_session_status,
+)
 from backend.app.orchestrator.qwen_agent import (
     QWEN_EXECUTION_LOCATION,
     QwenOrchestratorAgent,
@@ -233,6 +237,9 @@ class TradingScheduler:
                 "symbol": symbol,
                 "interval": interval,
                 "pred_return_t1": round(prediction.pred_return_t1, 6),
+                "pred_volatility_t1": round(prediction.pred_volatility_t1, 6),
+                "abstain": bool(prediction.abstain),
+                "direction_probs": dict(prediction.direction_probs),
                 "atr_14": round(prediction.atr_14, 4),
                 "model_detail": prediction.model_detail,
                 "latency_ms": round(lstm_ms, 2),
@@ -367,6 +374,7 @@ class TradingScheduler:
             atr_14=prediction.atr_14,
             candle_low=float(last_row["low"]),
             candle_high=float(last_row["high"]),
+            source_mode=source_mode,
         )
 
         sim_exec = self.paper_engine.simulate_execution(
@@ -379,6 +387,8 @@ class TradingScheduler:
         )
         sim_exec["snapshot"]["candle_time"] = candle_dict["close_time"]
         sim_exec["snapshot"]["source_mode"] = source_mode
+        declared_sl = sim_exec["snapshot"].get("stop_loss_price") or portfolio.stop_loss_price
+        declared_tp = sim_exec["snapshot"].get("take_profit_price") or portfolio.take_profit_price
         risk_paper_ms = (time.perf_counter() - t_stage) * 1000.0
 
         total_latency_ms = (time.perf_counter() - t_cycle_start) * 1000.0
@@ -409,6 +419,8 @@ class TradingScheduler:
             "risk_status": verdict.status,
             "risk_reason": verdict.reason,
             "final_action": verdict.final_action,
+            "stop_loss_price": declared_sl,
+            "take_profit_price": declared_tp,
             "latency_ms": round(total_latency_ms, 2),
             "qwen_execution_mode": str(qwen_out.get("execution_mode", QWEN_EXECUTION_LOCATION)),
             "laya_execution_mode": LAYA1_EXECUTION_MODE,
@@ -473,6 +485,8 @@ class TradingScheduler:
                 "risk_status": verdict.status,
                 "final_action": verdict.final_action,
                 "rule_triggered": verdict.rule_triggered,
+                "stop_loss_price": declared_sl,
+                "take_profit_price": declared_tp,
                 "equity": round(float(sim_exec["snapshot"]["total_equity"]), 2),
                 "latency_ms": round(risk_paper_ms, 2),
             },
@@ -517,6 +531,119 @@ class TradingScheduler:
             "latency_ms": round(total_latency_ms, 2),
             "stage_latencies_ms": stage_latencies_ms,
             "feedback_applied": feedback_applied,
+        }
+
+    def manual_liquidate(
+        self,
+        symbol: str,
+        market_price: float,
+        interval: str = "1d",
+        *,
+        enforce_market_hours: bool = True,
+        now_utc: Optional[datetime] = None,
+    ) -> Dict[str, Any]:
+        """
+        Liquidación manual (Paper): cierra al precio actual toda la posición abierta de `symbol`
+        registrando decisión SELL auditable (hash-chain), orden y snapshot atómicamente.
+        Bloquea la operación si el mercado del símbolo está cerrado (`enforce_market_hours=True`).
+        """
+        if enforce_market_hours:
+            mkt = get_market_session_status(symbol, now_utc=now_utc)
+            if not mkt["is_open"]:
+                self.db.log_error(
+                    error_code="RISK_MARKET_CLOSED",
+                    component="TradingScheduler",
+                    message=f"Liquidación bloqueada en {symbol}: {mkt['session_label']}",
+                    payload_excerpt=f"symbol={symbol}, et_time={mkt['et_time']}",
+                )
+                raise ValueError(
+                    f"Mercado cerrado para {symbol}: {mkt['session_label']}. No se pueden ejecutar liquidaciones hasta la apertura."
+                )
+
+        pos = self.db.get_position(symbol)
+        if pos is None or float(pos.get("quantity") or 0.0) < self.settings.min_lot_size:
+            raise ValueError(f"No hay posición abierta para liquidar en {symbol}.")
+        if market_price <= 0:
+            raise ValueError("Precio de mercado inválido para liquidar.")
+
+        exit_sl = pos.get("stop_loss_price")
+        exit_tp = pos.get("take_profit_price")
+
+        # Se permite liquidar aunque el sistema esté STOPPED: es una orden explícita del operador
+        prev_status = self.db.get_state("system_status", "RUNNING")
+        sim_exec = None
+        try:
+            if prev_status == "STOPPED":
+                self.db.set_state("system_status", "PAUSED")
+            sim_exec = self.paper_engine.simulate_execution(
+                action="SELL", symbol=symbol, market_price=market_price
+            )
+        finally:
+            if prev_status == "STOPPED":
+                self.db.set_state("system_status", "STOPPED")
+
+        now_iso = utc_now_iso()
+        sim_exec["snapshot"]["candle_time"] = now_iso
+        sim_exec["snapshot"]["source_mode"] = "live"
+        candle_id = self.db.register_candle_idempotent(
+            {
+                "symbol": symbol,
+                "interval": interval,
+                "open_time": now_iso,
+                "close_time": now_iso,
+                "open": market_price,
+                "high": market_price,
+                "low": market_price,
+                "close": market_price,
+                "volume": 0.0,
+                "source_mode": "live",
+            }
+        )
+        manual_meta = {"manual": True, "action": "SELL", "is_local_device": True,
+                       "justification": "Liquidación manual solicitada por el operador."}
+        decision_id = self.db.record_cycle_result(
+            candle_id=candle_id,
+            decision_data={
+                "symbol": symbol,
+                "interval": interval,
+                "candle_close_utc": now_iso,
+                "model_pred": 0.0,
+                "laya1_json": {**manual_meta, "signal_action": "SELL", "regime": "manual"},
+                "qwen_json": manual_meta,
+                "laya2_json": {**manual_meta, "approved": True, "security_status": "SAFE"},
+                "risk_status": "APPROVED",
+                "risk_reason": "MANUAL_LIQUIDATION",
+                "final_action": "SELL",
+                "stop_loss_price": exit_sl,
+                "take_profit_price": exit_tp,
+                "latency_ms": 0.0,
+                "qwen_execution_mode": "MANUAL",
+                "laya_execution_mode": "MANUAL",
+                "source_mode": "live",
+            },
+            order_data=sim_exec["order"],
+            snapshot_data=sim_exec["snapshot"],
+        )
+        self.db.set_state("peak_equity", str(sim_exec["peak_equity"]))
+        order = sim_exec["order"]
+        realized = float(order.get("realized_pnl") or 0.0)
+        self._emit(
+            "cycle_complete",
+            {
+                "decision_id": decision_id,
+                "symbol": symbol,
+                "interval": interval,
+                "final_action": "SELL",
+                "risk_status": "APPROVED",
+                "total_cycle_ms": 0.0,
+            },
+        )
+        return {
+            "decision_id": decision_id,
+            "symbol": symbol,
+            "exec_price": float(order["exec_price"]),
+            "quantity": float(order["quantity"]),
+            "realized_pnl": realized,
         }
 
     def run_single_live_cycle(

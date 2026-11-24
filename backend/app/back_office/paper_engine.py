@@ -21,6 +21,13 @@ import numpy as np
 
 from backend.app.back_office.database import TradingDatabase, utc_now_iso
 from backend.app.core.config import Settings
+from backend.app.core.quant_metrics import (
+    deflated_sharpe_ratio,
+    fractional_kelly_allocation,
+    historical_var_cvar,
+    probabilistic_sharpe_ratio,
+    spearman_rank_ic,
+)
 
 
 class InsufficientFundsError(RuntimeError):
@@ -228,10 +235,16 @@ class PaperTradingEngine:
             return min(float(self.settings.max_exposure_pct), float(target_exposure_pct))
         if conviction_score is not None or vol_20 is not None:
             v = max(float(vol_20 if vol_20 is not None else 0.02), 0.005)
-            vol_scale = float(np.clip(0.018 / v, 0.35, 1.0))
-            conv_val = float(conviction_score if conviction_score is not None else 0.65)
-            conv_scale = float(np.clip(conv_val, 0.35, 1.0))
-            return float(np.clip(max_single * vol_scale * conv_scale * 1.35, 0.12, max_single))
+            p_win = float(np.clip(float(conviction_score if conviction_score is not None else 0.62), 0.45, 0.90))
+            return fractional_kelly_allocation(
+                p_win=p_win,
+                payoff_ratio=1.75,
+                kelly_fraction=0.5,
+                vol_20=v,
+                target_vol=0.018,
+                min_alloc=0.12,
+                max_alloc=min(float(self.settings.max_exposure_pct), max_single),
+            )
         return min(float(self.settings.max_exposure_pct), max_single)
 
     def simulate_execution(
@@ -493,6 +506,122 @@ class PaperTradingEngine:
 
         raise ValueError(f"Acción inválida: {action}")
 
+    def recalculate_open_positions_targets(
+        self,
+        live_quotes: Optional[Dict[str, Any]] = None,
+        market_client: Any = None,
+        predictor: Any = None,
+        interval: str = "1d",
+    ) -> List[Dict[str, Any]]:
+        """
+        Recalcula periódicamente Take-Profit (precio objetivo) y Stop-Loss (ratchet defensivo)
+        para cada posición abierta, minimizando la pérdida máxima sin bajar el SL previo.
+        """
+        positions = self.db.list_positions()
+        if not positions:
+            return []
+
+        now = utc_now_iso()
+        updated_list: List[Dict[str, Any]] = []
+        for pos in positions:
+            sym = str(pos["symbol"])
+            qty = float(pos.get("quantity") or 0.0)
+            if qty < self.min_lot_size:
+                continue
+
+            avg_entry = float(pos.get("avg_entry_price") or 0.0)
+            stored_px = float(pos.get("last_price") or avg_entry)
+            q_info = (live_quotes or {}).get(sym) if live_quotes else None
+            cur_px = (
+                float(q_info["price"])
+                if q_info and float(q_info.get("price") or 0.0) > 0.0
+                else stored_px
+            )
+            if cur_px <= 0.0:
+                continue
+
+            old_sl = (
+                float(pos["stop_loss_price"])
+                if pos.get("stop_loss_price") is not None
+                else round(avg_entry * 0.96, 4)
+            )
+            old_tp = (
+                float(pos["take_profit_price"])
+                if pos.get("take_profit_price") is not None
+                else round(avg_entry * 1.07, 4)
+            )
+            high_px = max(float(pos.get("highest_price") or cur_px), cur_px, avg_entry)
+            trail_pct = float(pos.get("trailing_stop_pct") or self.settings.trailing_stop_pct)
+
+            atr_val = cur_px * 0.018
+            pred_ret = 0.0
+            if market_client is not None and predictor is not None:
+                try:
+                    df = market_client.load_replay_candles(symbol=sym, interval=interval)
+                    if len(df) >= 35:
+                        pr = predictor.predict_from_candles(df, symbol=sym, interval=interval)
+                        if float(pr.atr_14) > 0.0:
+                            atr_val = float(pr.atr_14)
+                        pred_ret = float(pr.pred_return_t1)
+                except Exception:
+                    pass
+
+            if cur_px >= avg_entry * 1.004:
+                raw_sl = max(old_sl, avg_entry * 1.0005, high_px * (1.0 - trail_pct))
+                new_sl = round(max(old_sl, min(raw_sl, cur_px * 0.9965)), 4)
+            else:
+                defensive_sl = min(cur_px * 0.9965, cur_px - min(1.25 * atr_val, cur_px * 0.020))
+                new_sl = round(max(old_sl, defensive_sl), 4)
+
+            if cur_px < avg_entry:
+                new_tp = round(
+                    max(
+                        avg_entry * 1.0025,
+                        cur_px + 1.35 * atr_val,
+                        cur_px * (1.0 + max(0.004, pred_ret)),
+                    ),
+                    4,
+                )
+            else:
+                new_tp = round(
+                    max(
+                        avg_entry * 1.012,
+                        cur_px + 1.75 * atr_val,
+                        cur_px * (1.0 + max(0.007, pred_ret)),
+                    ),
+                    4,
+                )
+
+            target_changed = (abs(new_tp - old_tp) >= 1e-4) or (abs(new_sl - old_sl) >= 1e-4)
+            self.db.upsert_position(
+                {
+                    "symbol": sym,
+                    "quantity": qty,
+                    "avg_entry_price": avg_entry,
+                    "entry_cost_total": float(pos.get("entry_cost_total") or (qty * avg_entry)),
+                    "last_price": cur_px,
+                    "highest_price": high_px,
+                    "stop_loss_price": new_sl,
+                    "take_profit_price": new_tp,
+                    "trailing_stop_pct": trail_pct,
+                    "opened_at": pos.get("opened_at") or now,
+                    "updated_at": now,
+                }
+            )
+            updated_list.append(
+                {
+                    "symbol": sym,
+                    "current_price": round(cur_px, 4),
+                    "prev_tp": old_tp,
+                    "new_tp": new_tp,
+                    "prev_sl": old_sl,
+                    "new_sl": new_sl,
+                    "target_changed": target_changed,
+                    "updated_at": now,
+                }
+            )
+        return updated_list
+
     def compute_portfolio_metrics(self) -> Dict[str, Any]:
         """Calcula métricas institucionales auditables del portafolio en escala original."""
         snapshots = self.db.list_snapshots(limit=5000)
@@ -528,6 +657,11 @@ class PaperTradingEngine:
                 "sharpe_ratio": 0.0,
                 "sortino_ratio": 0.0,
                 "calmar_ratio": 0.0,
+                "psr": 0.0,
+                "dsr": 0.0,
+                "var_95_pct": 0.0,
+                "cvar_95_pct": 0.0,
+                "rank_ic": 0.0,
                 "profit_factor": profit_factor,
                 "expectancy": expectancy,
                 "exposure_pct": 0.0,
@@ -542,6 +676,10 @@ class PaperTradingEngine:
 
         sharpe = 0.0
         sortino = 0.0
+        psr = 0.0
+        dsr = 0.0
+        var_95 = 0.0
+        cvar_95 = 0.0
         if len(equities) >= 3:
             rets = np.diff(equities) / np.where(equities[:-1] > 0, equities[:-1], 1.0)
             mean_r = float(np.mean(rets))
@@ -553,6 +691,14 @@ class PaperTradingEngine:
                 down_std = float(np.sqrt(np.mean(downside ** 2)))
                 if down_std > 1e-8:
                     sortino = round((mean_r / down_std) * math.sqrt(252.0), 3)
+            psr = probabilistic_sharpe_ratio(rets, benchmark_sr=0.0)
+            dsr = deflated_sharpe_ratio(rets, n_trials=30)
+            var_val, cvar_val = historical_var_cvar(rets, alpha=0.95)
+            var_95 = round(var_val * 100.0, 3)
+            cvar_95 = round(cvar_val * 100.0, 3)
+
+        pred_pairs, real_pairs = self.db.list_prediction_return_pairs(limit=300)
+        rank_ic = spearman_rank_ic(pred_pairs, real_pairs)
 
         calmar = round(net_ret / max_dd, 3) if max_dd > 1e-6 else 0.0
         state_now = self.get_portfolio_state()
@@ -569,6 +715,11 @@ class PaperTradingEngine:
             "sharpe_ratio": sharpe,
             "sortino_ratio": sortino,
             "calmar_ratio": calmar,
+            "psr": psr,
+            "dsr": dsr,
+            "var_95_pct": var_95,
+            "cvar_95_pct": cvar_95,
+            "rank_ic": rank_ic,
             "profit_factor": profit_factor,
             "expectancy": expectancy,
             "exposure_pct": round(state_now.total_exposure_pct * 100.0, 2),

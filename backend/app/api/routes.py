@@ -9,8 +9,10 @@ El frontend React NUNCA almacena GATEWAY_API_KEY en variables VITE_*.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta
-from typing import Any, Dict, Optional
+import threading
+import time
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
@@ -36,6 +38,7 @@ from backend.app.core.security import (
 )
 from backend.app.front_office.features import _compute_rsi
 from backend.app.front_office.laya_alpha import LLMServiceUnavailableError
+from backend.app.middle_office.risk_engine import get_market_session_status
 from backend.app.orchestrator.qwen_agent import QwenInvalidOutputError
 
 router = APIRouter(prefix="/api", tags=["trading-agent"])
@@ -120,7 +123,7 @@ def get_system_status(request: Request) -> Dict[str, Any]:
     source_mode = db.get_state("source_mode", "replay")
     candle_interval = db.get_state("candle_interval", settings.candle_interval) or settings.candle_interval
     qwen_mode = db.get_state("qwen_mode", settings.qwen_execution_mode) or settings.qwen_execution_mode
-    portfolio_state = paper_engine.get_portfolio_state()
+    portfolio_state = paper_engine.get_portfolio_state(symbol=active_ticker)
     metrics = paper_engine.compute_portfolio_metrics()
     laya1_feedback = _parse_state_json(db, "laya1_feedback_json")
     laya2_feedback = _parse_state_json(db, "laya2_feedback_json")
@@ -143,6 +146,7 @@ def get_system_status(request: Request) -> Dict[str, Any]:
         "laya1_feedback": laya1_feedback,
         "laya2_feedback": laya2_feedback,
         "stage_latencies_ms": stage_latencies_ms,
+        "daemon": request.app.state.scheduler.daemon_status(),
         "simulation_profile": settings.simulation_profile,
         "profile_config": {
             "name": settings.profile_config.name,
@@ -165,13 +169,89 @@ def get_system_status(request: Request) -> Dict[str, Any]:
         },
         "metrics": metrics,
         "processed_candles_count": db.count_processed_candles(),
+        "market_session": get_market_session_status(active_ticker),
+        "us_equities_session": get_market_session_status("SPY"),
     }
 
 
 @router.get("/decisions")
 def get_decisions(request: Request, limit: int = 50) -> Dict[str, Any]:
     db = request.app.state.db
-    return {"items": db.list_decisions(limit=min(limit, 200))}
+    return db.list_decisions_with_settlement(limit=min(limit, 200))
+
+
+@router.get("/quotes")
+def get_live_quotes(
+    request: Request,
+    symbols: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Devuelve cotizaciones actuales en tiempo real (MEXC / Yahoo 1m) para la bitácora."""
+    settings = request.app.state.settings
+    db = request.app.state.db
+    market_client = request.app.state.market_client
+
+    sym_list: List[str] = []
+    if symbols:
+        for raw in symbols.split(","):
+            s = raw.strip()
+            if s in settings.allowed_symbols and s not in sym_list:
+                sym_list.append(s)
+    else:
+        for p in db.list_positions():
+            s = str(p["symbol"])
+            if s in settings.allowed_symbols and s not in sym_list:
+                sym_list.append(s)
+        active = db.get_state("active_ticker", settings.trading_symbol) or settings.trading_symbol
+        if active in settings.allowed_symbols and active not in sym_list:
+            sym_list.append(active)
+
+    sym_list = sym_list[:30]
+    quotes_map = market_client.fetch_realtime_quotes_batch(sym_list) if sym_list else {}
+
+    for sym in sym_list:
+        if sym not in quotes_map:
+            pos = db.get_position(sym)
+            if pos and float(pos.get("last_price") or 0.0) > 0:
+                quotes_map[sym] = {
+                    "price": round(float(pos["last_price"]), 4),
+                    "change_pct_24h": None,
+                    "source": "DB_POSITION",
+                    "online": False,
+                    "updated_at_utc": str(pos.get("updated_at") or ""),
+                }
+
+    # Recálculo periódico de TP/SL cada 10s para posiciones abiertas (minimización de pérdidas)
+    recalculated: List[Dict[str, Any]] = []
+    now_mono = time.monotonic()
+    last_recalc = float(getattr(request.app.state, "_last_target_recalc_mono", 0.0) or 0.0)
+    if (now_mono - last_recalc) >= 10.0:
+        request.app.state._last_target_recalc_mono = now_mono
+        try:
+            tf = db.get_state("candle_interval", settings.candle_interval) or "1d"
+            recalculated = request.app.state.paper_engine.recalculate_open_positions_targets(
+                live_quotes=quotes_map,
+                market_client=market_client,
+                predictor=request.app.state.predictor,
+                interval=tf,
+            )
+            changed = [r for r in recalculated if r.get("target_changed")]
+            if changed and getattr(request.app.state, "event_bus", None) is not None:
+                request.app.state.event_bus.publish(
+                    "target_recalc",
+                    {
+                        "count": len(changed),
+                        "symbols": [c["symbol"] for c in changed],
+                        "updates": changed,
+                    },
+                )
+        except Exception:
+            recalculated = []
+
+    return {
+        "quotes": quotes_map,
+        "recalculated_targets": recalculated,
+        "updated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
 
 
 @router.get("/portfolio")
@@ -199,6 +279,150 @@ def get_errors(request: Request, limit: int = 100) -> Dict[str, Any]:
     return {"items": db.list_errors(limit=min(limit, 300))}
 
 
+def _compute_scanner_data(
+    request: Request, interval: str, *, force_refresh: bool = False
+) -> Dict[str, Any]:
+    cache = getattr(request.app.state, "_scanner_cache", {})
+    now_m = time.monotonic()
+    cached = cache.get(interval)
+    if not force_refresh and cached is not None and (now_m - cached["ts"]) < 15.0:
+        return cached["data"]
+
+    settings = request.app.state.settings
+    market_client = request.app.state.market_client
+    predictor = request.app.state.predictor
+    laya_alpha = request.app.state.laya_alpha
+    paper_engine = request.app.state.paper_engine
+
+    rows: List[Dict[str, Any]] = []
+    buy_cnt, hold_cnt, sell_cnt = 0, 0, 0
+    for sym in settings.primary_tickers:
+        try:
+            df = market_client.load_replay_candles(symbol=sym, interval=interval)
+            if len(df) < 35:
+                continue
+            pr = predictor.predict_from_candles(df, symbol=sym, interval=interval)
+            last_px = float(df["close"].iloc[-1])
+            close_t = str(df["close_time"].iloc[-1])
+            port = paper_engine.get_portfolio_state(current_price=last_px, symbol=sym)
+            pos_open = port.position_qty >= settings.min_lot_size
+            l1 = laya_alpha.evaluate(
+                prediction=pr,
+                position_open=pos_open,
+                gateway_key=settings.gateway_api_key,
+                strict_live=False,
+            )
+            if l1.signal_action == "BUY":
+                buy_cnt += 1
+            elif l1.signal_action == "SELL":
+                sell_cnt += 1
+            else:
+                hold_cnt += 1
+
+            alpha_score = (pr.pred_return_t1 / max(pr.vol_20, 1e-4)) * l1.conviction_score
+            rows.append(
+                {
+                    "symbol": sym,
+                    "interval": interval,
+                    "close_price": round(last_px, 4),
+                    "candle_close_utc": close_t,
+                    "pred_return_t1": round(pr.pred_return_t1, 6),
+                    "pred_return_pct": round(pr.pred_return_t1 * 100.0, 4),
+                    "signal_action": l1.signal_action,
+                    "regime": l1.regime,
+                    "conviction_score": round(l1.conviction_score, 4),
+                    "kelly_alloc_pct": round(l1.recommended_exposure_pct * 100.0, 2),
+                    "alpha_score": round(alpha_score, 4),
+                    "position_open": bool(pos_open),
+                    "model_detail": pr.model_detail,
+                }
+            )
+        except Exception:
+            continue
+
+    rows.sort(
+        key=lambda r: (
+            2 if r["signal_action"] == "SELL" else (1 if r["signal_action"] == "BUY" else 0),
+            r["alpha_score"],
+        ),
+        reverse=True,
+    )
+    data = {
+        "interval": interval,
+        "scanned_count": len(rows),
+        "buy_signals_count": buy_cnt,
+        "hold_signals_count": hold_cnt,
+        "sell_signals_count": sell_cnt,
+        "all_items": rows,
+    }
+    if not isinstance(getattr(request.app.state, "_scanner_cache", None), dict):
+        request.app.state._scanner_cache = {}
+    request.app.state._scanner_cache[interval] = {"ts": now_m, "data": data}
+    return data
+
+
+@router.get("/scanner")
+def get_market_scanner(
+    request: Request,
+    interval: Optional[str] = None,
+    top_n: int = 12,
+) -> Dict[str, Any]:
+    """Escáner transversal estilo Fincept Screener sobre los 30 tickers oficiales."""
+    settings = request.app.state.settings
+    db = request.app.state.db
+    tf = interval or db.get_state("candle_interval", settings.candle_interval) or "1d"
+    if tf not in {"1h", "1d"}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Temporalidad inválida.")
+    snap = _compute_scanner_data(request, tf)
+    clamped = max(1, min(int(top_n), 30))
+    return {
+        "interval": snap["interval"],
+        "scanned_count": snap["scanned_count"],
+        "buy_signals_count": snap["buy_signals_count"],
+        "hold_signals_count": snap["hold_signals_count"],
+        "sell_signals_count": snap["sell_signals_count"],
+        "items": snap["all_items"][:clamped],
+    }
+
+
+@router.get("/audit/verify")
+def verify_audit_chain(request: Request, limit: int = 1000) -> Dict[str, Any]:
+    """Verifica la cadena criptográfica SHA-256 de decisiones (estilo autonomous-audit)."""
+    return request.app.state.db.verify_decision_audit_chain(limit=min(limit, 5000))
+
+
+@router.get("/audit/movements")
+def get_audited_movements(request: Request, limit: int = 100) -> Dict[str, Any]:
+    """Devuelve movimientos ejecutados auditados con TP/SL, PnL neto y hash SHA-256."""
+    return request.app.state.db.list_audited_movements(limit=min(int(limit), 300))
+
+
+@router.get("/news")
+def get_ticker_news(
+    request: Request,
+    symbol: Optional[str] = None,
+    refresh: bool = False,
+) -> Dict[str, Any]:
+    """Recupera noticias RSS reales, catalizadores y score de sentimiento para el ticker activo."""
+    settings = request.app.state.settings
+    db = request.app.state.db
+    sym = symbol or db.get_state("active_ticker", settings.trading_symbol) or settings.trading_symbol
+    if sym not in settings.allowed_symbols:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Símbolo inválido '{sym}'. Permitidos: {settings.primary_tickers}",
+        )
+    active_mode = db.get_state("source_mode", "replay") or "replay"
+    news_ctx = request.app.state.news_service.get_symbol_context(
+        symbol=sym, source_mode="live", fetch_live=True, force_refresh=refresh
+    )
+    return {
+        **news_ctx,
+        "agent_source_mode": active_mode,
+        "agent_injection_active": active_mode == "live",
+    }
+
+
 @router.get("/candles")
 def get_ticker_candles(
     request: Request,
@@ -206,8 +430,10 @@ def get_ticker_candles(
     limit: int = 200,
     mode: Optional[str] = None,
     interval: Optional[str] = None,
+    include_forming: bool = True,
+    realtime: bool = False,
 ) -> Dict[str, Any]:
-    """Devuelve velas OHLCV cerradas (1h o 1d), EMA10/EMA20, RSI-14, marcadores y pronóstico del agente."""
+    """Devuelve velas OHLCV (1h o 1d), EMA10/EMA20, RSI-14, marcadores, telemetría MEXC en vivo y pronóstico."""
     settings = request.app.state.settings
     db = request.app.state.db
     market_client = request.app.state.market_client
@@ -228,16 +454,31 @@ def get_ticker_candles(
 
     clamped_limit = max(1, min(int(limit), 300))
     effective_mode = mode or db.get_state("source_mode", "replay") or "replay"
+    use_live = (effective_mode == "live") or bool(realtime)
+    is_mexc_native = sym.upper() in {"BTC-USD", "BTCUSDT"}
     data_source = "replay"
-    if effective_mode == "live":
+    mexc_realtime: Optional[Dict[str, Any]] = None
+
+    if use_live:
         try:
             df = market_client.fetch_live_candles(
-                symbol=sym, interval=tf, limit=max(clamped_limit + 50, 250)
+                symbol=sym,
+                interval=tf,
+                limit=max(clamped_limit + 50, 250),
+                include_forming=bool(include_forming),
             )
-            data_source = "live"
+            mexc_target = sym if is_mexc_native else "BTCUSDT"
+            mexc_realtime = market_client.fetch_mexc_realtime_ticker(mexc_target)
+            if is_mexc_native:
+                data_source = "MEXC API /api/v3/klines (LIVE)"
+            elif mexc_realtime and mexc_realtime.get("mexc_online"):
+                data_source = "MEXC Live Stream + Market Feed (LIVE)"
+            else:
+                data_source = "Market Live Feed (LIVE)"
         except Exception:
             df = market_client.load_replay_candles(symbol=sym, interval=tf)
             data_source = "replay_fallback"
+            use_live = False
     else:
         df = market_client.load_replay_candles(symbol=sym, interval=tf)
 
@@ -249,9 +490,11 @@ def get_ticker_candles(
 
     view_df = df.tail(clamped_limit).reset_index(drop=True)
 
-    candles = []
+    candles_by_time: Dict[Any, Dict[str, Any]] = {}
     close_to_chart_time: Dict[str, Any] = {}
     for _, row in view_df.iterrows():
+        if any(pd.isna(row[k]) for k in ("open", "high", "low", "close")):
+            continue
         open_iso = str(row["open_time"])
         close_iso = str(row["close_time"])
         if tf == "1h":
@@ -261,29 +504,28 @@ def get_ticker_candles(
             chart_time = close_iso[:10]
             label = close_iso[:10]
         close_to_chart_time[close_iso] = chart_time
-        candles.append(
-            {
-                "time": chart_time,
-                "label": label,
-                "open_time": open_iso,
-                "close_time": close_iso,
-                "open": round(float(row["open"]), 4),
-                "high": round(float(row["high"]), 4),
-                "low": round(float(row["low"]), 4),
-                "close": round(float(row["close"]), 4),
-                "volume": round(float(row["volume"]), 2),
-                "ema10": round(float(row["ema10"]), 4),
-                "ema20": round(float(row["ema20"]), 4),
-                "rsi_14": round(float(row["rsi_14"]), 2),
-            }
-        )
+        candles_by_time[chart_time] = {
+            "time": chart_time,
+            "label": label,
+            "open_time": open_iso,
+            "close_time": close_iso,
+            "open": round(float(row["open"]), 4),
+            "high": round(float(row["high"]), 4),
+            "low": round(float(row["low"]), 4),
+            "close": round(float(row["close"]), 4),
+            "volume": round(float(row["volume"]), 2),
+            "ema10": round(float(row["ema10"]), 4),
+            "ema20": round(float(row["ema20"]), 4),
+            "rsi_14": round(float(row["rsi_14"]), 2),
+        }
+    candles = sorted(candles_by_time.values(), key=lambda c: c["time"])
 
-    last_close = float(view_df["close"].iloc[-1]) if not view_df.empty else 0.0
-    prev_close = float(view_df["close"].iloc[-2]) if len(view_df) >= 2 else last_close
+    last_close = float(candles[-1]["close"]) if candles else 0.0
+    prev_close = float(candles[-2]["close"]) if len(candles) >= 2 else last_close
     change_pct_1d = ((last_close - prev_close) / prev_close * 100.0) if prev_close > 0 else 0.0
-    high_period = float(view_df["high"].max()) if not view_df.empty else 0.0
-    low_period = float(view_df["low"].min()) if not view_df.empty else 0.0
-    last_rsi_14 = float(view_df["rsi_14"].iloc[-1]) if not view_df.empty else 50.0
+    high_period = max((float(c["high"]) for c in candles), default=0.0)
+    low_period = min((float(c["low"]) for c in candles), default=0.0)
+    last_rsi_14 = float(candles[-1]["rsi_14"]) if candles else 50.0
 
     # Marcadores cronológicos de operaciones BUY/SELL del agente en el ticker y temporalidad
     markers_by_time: Dict[Any, Dict[str, Any]] = {}
@@ -390,6 +632,10 @@ def get_ticker_candles(
         "interval": tf,
         "horizon_label": horizon_label,
         "data_source": data_source,
+        "is_realtime": bool(use_live),
+        "is_mexc_native": bool(is_mexc_native),
+        "mexc_realtime": mexc_realtime,
+        "updated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "last_close": round(last_close, 4),
         "prev_close": round(prev_close, 4),
         "change_pct_1d": round(change_pct_1d, 4),
@@ -427,7 +673,7 @@ def get_benchmark(
 
 
 @router.post("/control/{action}")
-def control_action(
+async def control_action(
     action: str,
     request: Request,
     payload: Optional[ControlPayload] = None,
@@ -440,20 +686,74 @@ def control_action(
 
     if action == "start":
         db.set_state("system_status", "RUNNING")
-        return {"status": "RUNNING", "message": "Agente iniciado (RUNNING)."}
+        if db.get_state("qwen_mode", settings.qwen_execution_mode) == "LOCAL_DEVICE":
+            threading.Thread(
+                target=request.app.state.qwen_agent.warmup_local_model, daemon=True
+            ).start()
+        daemon_st = await scheduler.start_daemon(interval_seconds=25)
+        return {
+            "status": "RUNNING",
+            "daemon": daemon_st,
+            "message": "Agente y daemon autónomo iniciados (RUNNING).",
+        }
 
     if action == "pause":
         db.set_state("system_status", "PAUSED")
-        return {"status": "PAUSED", "message": "Agente pausado (PAUSED)."}
+        daemon_st = await scheduler.stop_daemon()
+        return {"status": "PAUSED", "daemon": daemon_st, "message": "Agente pausado (PAUSED)."}
 
     if action == "stop":
         # Detener bloquea nuevas órdenes pero NO liquida automáticamente la posición abierta
         db.set_state("system_status", "STOPPED")
+        daemon_st = await scheduler.stop_daemon()
         state = request.app.state.paper_engine.get_portfolio_state()
         return {
             "status": "STOPPED",
+            "daemon": daemon_st,
             "message": "Kill-Switch STOP activado: nuevas órdenes bloqueadas, posición preservada.",
             "preserved_position_qty": state.position_qty,
+        }
+
+    if action == "reset_portfolio":
+        await scheduler.stop_daemon()
+        reset_res = db.reset_paper_portfolio(settings.profile_config.initial_capital)
+        if hasattr(request.app.state, "_scanner_cache"):
+            request.app.state._scanner_cache = {}
+        return {
+            "status": "RUNNING",
+            **reset_res,
+            "message": (
+                f"Cartera Paper restaurada a ${settings.profile_config.initial_capital:,.2f}, "
+                "estado RUNNING y cadena SHA-256 reiniciada."
+            ),
+        }
+
+    if action == "liquidate":
+        sym = body.symbol
+        if not sym or sym not in settings.allowed_symbols:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Símbolo inválido para liquidar.",
+            )
+        pos = db.get_position(sym)
+        if pos is None or float(pos.get("quantity") or 0.0) < settings.min_lot_size:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"No hay posición abierta en {sym}; ya fue liquidada.",
+            )
+        live_q = request.app.state.market_client.fetch_realtime_quotes_batch([sym]).get(sym)
+        px = float(live_q["price"]) if live_q else float(pos.get("last_price") or 0.0)
+        tf = body.interval or db.get_state("candle_interval", settings.candle_interval) or "1d"
+        try:
+            res = scheduler.manual_liquidate(symbol=sym, market_price=px, interval=tf)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        return {
+            **res,
+            "message": (
+                f"{sym} liquidado @ ${res['exec_price']:,.4f} "
+                f"({res['quantity']:.4f} u.) • PnL realizado ${res['realized_pnl']:+,.2f}"
+            ),
         }
 
     if action == "switch_ticker":
@@ -501,6 +801,10 @@ def control_action(
             )
         target_mode = norm_map[raw_qm]
         db.set_state("qwen_mode", target_mode)
+        if target_mode == "LOCAL_DEVICE":
+            threading.Thread(
+                target=request.app.state.qwen_agent.warmup_local_model, daemon=True
+            ).start()
         topo = settings.hybrid_topology_metadata(active_qwen_mode=target_mode)
         return {
             "qwen_mode": target_mode,
@@ -512,12 +816,55 @@ def control_action(
             ),
         }
 
+    if action == "recalculate_targets":
+        tf = body.interval or db.get_state("candle_interval", settings.candle_interval) or "1d"
+        open_pos = db.list_positions()
+        syms = [str(p["symbol"]) for p in open_pos]
+        quotes_map = (
+            request.app.state.market_client.fetch_realtime_quotes_batch(syms)
+            if syms
+            else {}
+        )
+        updated = request.app.state.paper_engine.recalculate_open_positions_targets(
+            live_quotes=quotes_map,
+            market_client=request.app.state.market_client,
+            predictor=request.app.state.predictor,
+            interval=tf,
+        )
+        request.app.state._last_target_recalc_mono = time.monotonic()
+        if updated and getattr(request.app.state, "event_bus", None) is not None:
+            request.app.state.event_bus.publish(
+                "target_recalc",
+                {
+                    "count": len(updated),
+                    "symbols": [u["symbol"] for u in updated],
+                    "updates": updated,
+                },
+            )
+        return {
+            "recalculated_count": len(updated),
+            "updates": updated,
+            "message": f"Objetivos TP/SL recalculados en {len(updated)} posiciones abiertas.",
+        }
+
     if action == "step":
         sym = body.symbol or db.get_state("active_ticker", settings.trading_symbol) or settings.trading_symbol
         mode = body.mode or db.get_state("source_mode", "replay") or "replay"
         tf = body.interval or db.get_state("candle_interval", settings.candle_interval) or "1d"
         try:
             if mode == "live":
+                mkt = get_market_session_status(sym)
+                if not mkt["is_open"]:
+                    db.log_error(
+                        error_code="RISK_MARKET_CLOSED",
+                        component="ControlGateway",
+                        message=f"Ciclo live bloqueado en {sym}: {mkt['session_label']}",
+                        payload_excerpt=f"symbol={sym}, action=step",
+                    )
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail=f"Mercado cerrado para {sym} ({mkt['session_label']}). No se permiten operaciones.",
+                    )
                 res = scheduler.run_single_live_cycle(
                     symbol=sym, gateway_key=settings.gateway_api_key, interval=tf
                 )
@@ -568,6 +915,87 @@ def control_action(
             "cycles_executed": len(cycles),
             "last_cycle": cycles[-1] if cycles else None,
         }
+
+    if action == "scan_and_step":
+        mode = body.mode or db.get_state("source_mode", "replay") or "replay"
+        tf = body.interval or db.get_state("candle_interval", settings.candle_interval) or "1d"
+        snap = _compute_scanner_data(request, tf, force_refresh=True)
+        items = snap["all_items"]
+        if not items:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Sin datos suficientes en el scanner para temporalidad {tf}.",
+            )
+
+        chosen_item = items[0]
+        if mode == "replay":
+            for cand in items:
+                if not db.is_candle_processed(cand["symbol"], tf, cand["candle_close_utc"], "replay"):
+                    chosen_item = cand
+                    break
+        else:
+            open_candidates = [c for c in items if get_market_session_status(c["symbol"])["is_open"]]
+            if not open_candidates:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Todos los mercados de acciones US están cerrados; no se permiten operaciones live en este horario.",
+                )
+            chosen_item = open_candidates[0]
+
+        chosen_sym = chosen_item["symbol"]
+        db.set_state("active_ticker", chosen_sym)
+        try:
+            if mode == "live":
+                res = scheduler.run_single_live_cycle(
+                    symbol=chosen_sym, gateway_key=settings.gateway_api_key, interval=tf
+                )
+            else:
+                full_df = request.app.state.market_client.load_replay_candles(
+                    symbol=chosen_sym, interval=tf
+                )
+                start_search_idx = max(45, len(full_df) - 200)
+                res = None
+                for idx in range(len(full_df) - 1, start_search_idx - 1, -1):
+                    close_t = str(full_df.iloc[idx]["close_time"])
+                    if not db.is_candle_processed(chosen_sym, tf, close_t, "replay"):
+                        res = scheduler.process_candle_window(
+                            candles_df=full_df.iloc[: idx + 1].reset_index(drop=True),
+                            symbol=chosen_sym,
+                            interval=tf,
+                            source_mode="replay",
+                            gateway_key=settings.gateway_api_key,
+                        )
+                        break
+                if res is None:
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail=f"Velas recientes de {chosen_sym} ({tf}) ya procesadas en replay.",
+                    )
+            if hasattr(request.app.state, "_scanner_cache"):
+                request.app.state._scanner_cache = {}
+            return {
+                "mode": mode,
+                "interval": tf,
+                "selected_symbol": chosen_sym,
+                "scanner_summary": {
+                    "buy_signals_count": snap["buy_signals_count"],
+                    "hold_signals_count": snap["hold_signals_count"],
+                    "sell_signals_count": snap["sell_signals_count"],
+                },
+                "cycle": res,
+                "message": (
+                    f"Auto-Scan eligió {chosen_sym} ({chosen_item['signal_action']}, "
+                    f"r_hat={chosen_item['pred_return_pct']:+.2f}%) ➔ {res['risk']['final_action']}."
+                ),
+            }
+        except DuplicateCandleError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        except (StaleDataError, QwenInvalidOutputError) as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+        except (MarketDataUnavailableError, LLMServiceUnavailableError) as exc:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+        except (InsufficientFundsError, SystemStoppedError) as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
     if action == "benchmark":
         sym = body.symbol or db.get_state("active_ticker", settings.trading_symbol) or settings.trading_symbol
