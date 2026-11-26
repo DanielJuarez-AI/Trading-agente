@@ -49,6 +49,14 @@
         <span class="px-3 py-1 rounded-full text-xs font-semibold bg-cyan-500/20 text-cyan-300 border border-cyan-500/40">
           30 Tickers Activos
         </span>
+        <div class="inline-flex items-center rounded-full border border-indigo-500/40 bg-indigo-500/15 overflow-hidden">
+          <button id="btn-sound-toggle" type="button" onclick="toggleSoundAlerts()" class="px-3 py-1 text-xs font-semibold text-indigo-200 hover:bg-indigo-500/25 transition" title="Activa o silencia las alertas sonoras cuando se ejecuta una compra o venta">
+            🔊 Sonido: ON
+          </button>
+          <button id="btn-sound-test" type="button" onclick="testMovementSounds()" class="px-2 py-1 text-[11px] font-semibold text-indigo-300 hover:text-white hover:bg-indigo-500/30 border-l border-indigo-500/30 transition" title="Escuchar vista previa de los sonidos de compra y venta">
+            ♪ Probar
+          </button>
+        </div>
       </div>
     </header>
 
@@ -502,6 +510,9 @@
           <span id="audit-movements-summary" class="text-xs font-mono text-gray-400">Auditados: -- • Comisiones: -- • PnL Realizado: -- • Latente: --</span>
         </div>
         <div class="flex flex-wrap items-center gap-2">
+          <button id="btn-liquidate-all" type="button" onclick="liquidateAllPositions()" class="px-3 py-1.5 rounded-lg border border-rose-500/50 bg-rose-500/20 text-rose-200 text-xs font-semibold hover:bg-rose-500/35 disabled:opacity-40 disabled:cursor-not-allowed transition" title="Cierra todas las posiciones abiertas cuyo mercado esté activo al precio actual">
+            ⚡ Liquidar Todo
+          </button>
           <button type="button" onclick="recalculateTargetsAction()" class="px-3 py-1.5 rounded-lg border border-amber-500/40 bg-amber-500/15 text-amber-200 text-xs font-semibold hover:bg-amber-500/25 transition" title="Recalcula Take-Profit y Stop-Loss protector de todas las posiciones abiertas">
             🎯 Recalcular TP/SL Ahora
           </button>
@@ -525,6 +536,7 @@
               <th class="py-2">Actual / Salida</th>
               <th class="py-2">PnL Neto</th>
               <th class="py-2">Estado</th>
+              <th class="py-2">Acción</th>
               <th class="py-2">Regla Risk Gate</th>
               <th class="py-2 text-right">Hash SHA-256</th>
             </tr>
@@ -627,6 +639,166 @@
     let lastChartSymbol = null;
     let isChartFetchInFlight = false;
     let lastChartTickAtMs = 0;
+
+    // Web Audio API Sound Engine para movimientos ejecutados
+    let soundAlertsEnabled = (() => {
+      try {
+        return localStorage.getItem('trading_sound_enabled') !== 'false';
+      } catch (_) {
+        return true;
+      }
+    })();
+    let soundAudioCtx = null;
+    let soundBaselineInitialized = false;
+    const soundedMovementIds = new Set();
+
+    function ensureAudioContext() {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      if (!AudioCtx) return null;
+      if (!soundAudioCtx) {
+        soundAudioCtx = new AudioCtx();
+      }
+      if (soundAudioCtx.state === 'suspended') {
+        soundAudioCtx.resume().catch(() => {});
+      }
+      return soundAudioCtx;
+    }
+
+    window.addEventListener('pointerdown', () => { ensureAudioContext(); }, { once: true, passive: true });
+    window.addEventListener('keydown', () => { ensureAudioContext(); }, { once: true, passive: true });
+
+    function updateSoundToggleUI() {
+      const btn = document.getElementById('btn-sound-toggle');
+      if (!btn) return;
+      btn.textContent = soundAlertsEnabled ? '🔊 Sonido: ON' : '🔇 Sonido: OFF';
+      btn.className = soundAlertsEnabled
+        ? 'px-3 py-1 text-xs font-semibold text-emerald-200 hover:bg-emerald-500/20 transition'
+        : 'px-3 py-1 text-xs font-semibold text-gray-400 hover:bg-gray-800 transition';
+    }
+
+    function _scheduleNotes(ctx, notes, masterGain = 0.14) {
+      const baseTime = ctx.currentTime + 0.015;
+      notes.forEach(n => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        const startAt = baseTime + (n.start || 0);
+        const dur = Math.max(0.04, n.dur || 0.12);
+        const peakGain = Math.max(0.01, (n.gain ?? 0.8) * masterGain);
+
+        osc.type = n.type || 'sine';
+        osc.frequency.setValueAtTime(n.freq, startAt);
+
+        gain.gain.setValueAtTime(0.0001, startAt);
+        gain.gain.exponentialRampToValueAtTime(peakGain, startAt + 0.012);
+        gain.gain.exponentialRampToValueAtTime(0.0001, startAt + dur);
+
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(startAt);
+        osc.stop(startAt + dur + 0.02);
+      });
+    }
+
+    function playToneSequence(notes, masterGain = 0.14) {
+      const ctx = ensureAudioContext();
+      if (!ctx || !Array.isArray(notes) || !notes.length) return;
+      if (ctx.state === 'suspended') {
+        ctx.resume().then(() => _scheduleNotes(ctx, notes, masterGain)).catch(() => {});
+      } else {
+        _scheduleNotes(ctx, notes, masterGain);
+      }
+    }
+
+    function toggleSoundAlerts() {
+      soundAlertsEnabled = !soundAlertsEnabled;
+      try {
+        localStorage.setItem('trading_sound_enabled', soundAlertsEnabled ? 'true' : 'false');
+      } catch (_) {}
+      updateSoundToggleUI();
+      if (soundAlertsEnabled) {
+        playToneSequence([{ freq: 880, start: 0, dur: 0.09, type: 'sine', gain: 0.7 }], 0.12);
+        showFeedback('Alertas sonoras activadas para cada movimiento.');
+      } else {
+        showFeedback('Alertas sonoras silenciadas.');
+      }
+    }
+
+    function classifyMovementSound(side, realizedPnl, ruleOrReason = '') {
+      const normSide = String(side || '').toUpperCase();
+      if (normSide === 'BUY') return 'BUY';
+      if (normSide === 'SELL') {
+        if (typeof realizedPnl === 'number' && !Number.isNaN(realizedPnl)) {
+          if (realizedPnl > 0) return 'SELL_PROFIT';
+          if (realizedPnl < 0) return 'SELL_LOSS';
+        }
+        const hint = String(ruleOrReason || '');
+        if (/TAKE_PROFIT|Take-Profit/i.test(hint)) return 'SELL_PROFIT';
+        if (/STOP_LOSS|Stop-Loss|TRAILING_STOP/i.test(hint)) return 'SELL_LOSS';
+        return 'SELL';
+      }
+      return null;
+    }
+
+    function playMovementSound(kind, ignoreMute = false) {
+      if (!kind) return;
+      if (!ignoreMute && !soundAlertsEnabled) return;
+      switch (kind) {
+        case 'BUY':
+          // Acorde ascendente C5 -> E5 -> G5 (Compra ejecutada)
+          playToneSequence([
+            { freq: 523.25, start: 0.00, dur: 0.11, type: 'triangle', gain: 0.85 },
+            { freq: 659.25, start: 0.09, dur: 0.11, type: 'triangle', gain: 0.90 },
+            { freq: 783.99, start: 0.18, dur: 0.18, type: 'triangle', gain: 0.95 },
+          ], 0.14);
+          break;
+        case 'SELL_PROFIT':
+          // Chime brillante E5 -> G#5 -> B5 -> E6 (Venta con ganancia / Take-Profit)
+          playToneSequence([
+            { freq: 659.25, start: 0.00, dur: 0.09, type: 'sine', gain: 0.80 },
+            { freq: 830.61, start: 0.08, dur: 0.09, type: 'sine', gain: 0.85 },
+            { freq: 987.77, start: 0.16, dur: 0.10, type: 'sine', gain: 0.90 },
+            { freq: 1318.51, start: 0.25, dur: 0.22, type: 'sine', gain: 1.00 },
+          ], 0.15);
+          break;
+        case 'SELL_LOSS':
+          // Alerta descendente G4 -> E4 -> C4 (Venta con pérdida / Stop-Loss)
+          playToneSequence([
+            { freq: 392.00, start: 0.00, dur: 0.12, type: 'triangle', gain: 0.90 },
+            { freq: 329.63, start: 0.12, dur: 0.12, type: 'triangle', gain: 0.85 },
+            { freq: 261.63, start: 0.24, dur: 0.20, type: 'triangle', gain: 0.80 },
+          ], 0.14);
+          break;
+        case 'SELL':
+          // Cierre neutro G5 -> D5 (Liquidación / venta en breakeven)
+          playToneSequence([
+            { freq: 783.99, start: 0.00, dur: 0.11, type: 'sine', gain: 0.85 },
+            { freq: 587.33, start: 0.11, dur: 0.17, type: 'sine', gain: 0.85 },
+          ], 0.13);
+          break;
+        default:
+          break;
+      }
+    }
+
+    function notifyMovementSound(decisionId, side, realizedPnl, ruleOrReason = '') {
+      const normSide = String(side || '').toUpperCase();
+      if (normSide !== 'BUY' && normSide !== 'SELL') return;
+      if (decisionId !== null && decisionId !== undefined) {
+        const idNum = Number(decisionId);
+        if (soundedMovementIds.has(idNum)) return;
+        soundedMovementIds.add(idNum);
+      }
+      const kind = classifyMovementSound(normSide, realizedPnl, ruleOrReason);
+      playMovementSound(kind);
+    }
+
+    function testMovementSounds() {
+      ensureAudioContext();
+      playMovementSound('BUY', true);
+      setTimeout(() => playMovementSound('SELL_PROFIT', true), 450);
+      setTimeout(() => playMovementSound('SELL_LOSS', true), 950);
+      showFeedback('Vista previa de sonidos: Compra ➔ Venta Ganancia (Take-Profit) ➔ Venta Pérdida (Stop-Loss).');
+    }
 
     // Initialize select options
     const tickerSelect = document.getElementById('ticker-select');
@@ -1621,10 +1793,14 @@
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || `Error HTTP ${res.status}`);
         showFeedback(data.message || `Acción '${action}' completada`);
+        if (action === 'reset_portfolio') {
+          soundedMovementIds.clear();
+          soundBaselineInitialized = false;
+        }
         await refreshDashboard();
-        if (['step', 'replay', 'scan_and_step', 'reset_portfolio', 'liquidate', 'recalculate_targets'].includes(action)) {
+        if (['step', 'replay', 'scan_and_step', 'reset_portfolio', 'liquidate', 'liquidate_all', 'recalculate_targets'].includes(action)) {
           if (data.selected_symbol) tickerSelect.value = data.selected_symbol;
-          if (action !== 'recalculate_targets' && action !== 'liquidate') {
+          if (action !== 'recalculate_targets' && action !== 'liquidate' && action !== 'liquidate_all') {
             await loadTickerChart(tickerSelect.value);
             loadTickerNews(tickerSelect.value, false);
           }
@@ -1825,8 +2001,31 @@
           hydrateConstellationFromDecision(latest);
         }
 
-        // Decisions Table
+        // Decisions Table & Sound notifications for new movements
         latestDecisionsPayload = decRes;
+        const decItems = Array.isArray(decRes?.items) ? decRes.items : [];
+        if (!soundBaselineInitialized) {
+          decItems.forEach(d => {
+            if (d && d.id !== undefined && d.id !== null) {
+              soundedMovementIds.add(Number(d.id));
+            }
+          });
+          soundBaselineInitialized = true;
+        } else {
+          const newMovs = decItems.filter(
+            d => d && d.id !== undefined && d.id !== null && d?.movement?.has_movement && !soundedMovementIds.has(Number(d.id))
+          );
+          if (newMovs.length > 0) {
+            const newest = newMovs[0];
+            newMovs.slice(1).forEach(d => soundedMovementIds.add(Number(d.id)));
+            notifyMovementSound(
+              newest.id,
+              newest.movement?.side || newest.final_action,
+              newest.movement?.realized_pnl,
+              newest.risk_reason || ''
+            );
+          }
+        }
         renderDecisionsTable();
         if (!Object.keys(liveQuotesCache).length) {
           refreshDecisionsLivePrices();
@@ -1972,6 +2171,18 @@
         loadAuditStatus();
         loadMovementsAudit();
         if (tickerSelect.value === symbol) loadTickerChart(symbol);
+      }
+    }
+
+    async function liquidateAllPositions() {
+      if (!confirm('¿Liquidar TODAS las posiciones abiertas al precio actual?')) return;
+      const res = await controlAction('liquidate_all', { interval: currentInterval });
+      if (res) {
+        await refreshDashboard();
+        loadScanner();
+        loadAuditStatus();
+        loadMovementsAudit();
+        loadTickerChart(tickerSelect.value);
       }
     }
 
@@ -2140,12 +2351,17 @@
           const uCls = (s.total_unrealized_pnl || 0) >= 0 ? 'text-emerald-300' : 'text-rose-300';
           aSum.innerHTML = `<span class="text-white">Auditados: ${s.total_movements ?? 0}</span> • <span class="text-amber-300">Sin liquidar: ${s.open_count ?? 0}</span> • <span class="text-emerald-300">Liquidados: ${s.liquidated_count ?? 0}</span> • Fees: <span class="text-gray-300">$${Number(s.total_fees || 0).toFixed(2)}</span> • Realizado: <span class="${rCls}">$${Number(s.total_realized_pnl || 0).toFixed(2)}</span> • Latente: <span class="${uCls}">$${Number(s.total_unrealized_pnl || 0).toFixed(2)}</span>`;
         }
+        const btnLiqAll = document.getElementById('btn-liquidate-all');
+        if (btnLiqAll) {
+          btnLiqAll.disabled = (s.open_count ?? 0) === 0;
+        }
         aBody.innerHTML = '';
         const items = Array.isArray(data.items) ? data.items : [];
         if (!items.length) {
-          aBody.innerHTML = '<tr><td colspan="13" class="py-4 text-center text-gray-500">Sin movimientos ejecutados para auditar.</td></tr>';
+          aBody.innerHTML = '<tr><td colspan="14" class="py-4 text-center text-gray-500">Sin movimientos ejecutados para auditar.</td></tr>';
           return;
         }
+        const eqSessionOpen = latestStatusData?.us_equities_session?.is_open !== false;
         items.forEach(it => {
           const tr = document.createElement('tr');
           tr.className = 'hover:bg-gray-800/40 transition';
@@ -2161,10 +2377,19 @@
             ? `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-300">✅ ${escapeHtml(it.settlement_label)}</span>`
             : `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/20 text-amber-300">🟡 ${escapeHtml(it.settlement_label)}</span>`;
 
+          const isCryptoSym = it.symbol === 'BTC-USD' || it.symbol === 'BTCUSDT';
+          const mktClosedForRow = !isCryptoSym && !eqSessionOpen;
+          let actionCellHtml = `<span class="text-gray-600 font-mono text-[11px]">—</span>`;
+          if (!it.is_liquidated) {
+            actionCellHtml = mktClosedForRow
+              ? `<button type="button" disabled class="px-2 py-1 rounded border border-gray-700 bg-gray-800/70 text-gray-500 text-[10px] font-semibold cursor-not-allowed whitespace-nowrap" title="Mercado NYSE/NASDAQ cerrado: no se permiten liquidaciones hasta la apertura">🔒 Cerrado</button>`
+              : `<button type="button" onclick="liquidatePosition('${escapeHtml(it.symbol)}')" class="px-2.5 py-1 rounded border border-rose-500/50 bg-rose-500/20 text-rose-200 text-[10px] font-bold hover:bg-rose-500/40 transition whitespace-nowrap" title="Cierra toda la posición abierta de ${escapeHtml(it.symbol)} al precio actual">Liquidar</button>`;
+          }
+
           tr.innerHTML = `
             <td class="py-2 font-mono text-[11px] text-gray-400">#${it.order_id} / D#${it.decision_id}</td>
             <td class="py-2 font-mono text-[11px] text-gray-400">${escapeHtml(String(it.executed_at || '').replace('T', ' ').slice(0, 19))}</td>
-            <td class="py-2 font-bold text-white">${escapeHtml(it.symbol)}</td>
+            <td class="py-2 font-bold text-white"><button type="button" onclick="selectScannerTicker('${escapeHtml(it.symbol)}')" class="hover:text-teal-300 hover:underline transition" title="Ver gráfica de ${escapeHtml(it.symbol)}">${escapeHtml(it.symbol)}</button></td>
             <td class="py-2"><span class="px-1.5 py-0.5 rounded text-[10px] font-bold ${isBuy ? 'bg-emerald-500/20 text-emerald-300' : 'bg-rose-500/20 text-rose-300'}">${isBuy ? 'COMPRA' : 'VENTA'}</span></td>
             <td class="py-2 font-mono">${qtyStr} @ $${Number(it.exec_price).toLocaleString()}</td>
             <td class="py-2 font-mono text-gray-300">$${Number(it.notional).toLocaleString()} <span class="text-gray-500">(-$${Number(it.fee).toFixed(2)})</span></td>
@@ -2173,6 +2398,7 @@
             <td class="py-2 font-mono text-sky-300">${refPx ? '$' + Number(refPx).toLocaleString() : '--'}</td>
             <td class="py-2">${pnlVal !== null && pnlVal !== undefined ? formatSignedUsd(pnlVal) : '--'}</td>
             <td class="py-2">${stBadge}</td>
+            <td class="py-2">${actionCellHtml}</td>
             <td class="py-2 text-[11px] text-gray-400 max-w-44 truncate" title="${escapeHtml(it.risk_reason || '')}">${escapeHtml(it.risk_reason || 'OK')}</td>
             <td class="py-2 text-right">${hBadge}</td>
           `;
@@ -2493,6 +2719,14 @@
             nodeId: 'risk',
             text: `[CICLO #${d.decision_id}] ${d.symbol} (${d.interval}) -> ${d.final_action} (${d.risk_status}) | ${d.total_cycle_ms} ms`,
           };
+          const isMov = d.has_movement === true || (
+            d.has_movement === undefined &&
+            d.risk_status === 'APPROVED' &&
+            (d.final_action === 'BUY' || d.final_action === 'SELL')
+          );
+          if (isMov) {
+            notifyMovementSound(d.decision_id, d.side || d.final_action, d.realized_pnl, d.rule_triggered || '');
+          }
           refreshDashboard();
           loadMovementsAudit();
           if (d.symbol === tickerSelect.value && d.interval === currentInterval) {
@@ -2882,6 +3116,7 @@
     }
 
     // Initial load and periodic refresh
+    updateSoundToggleUI();
     initStarConstellation();
     updateRealtimeButtonUI();
     refreshDashboard();
