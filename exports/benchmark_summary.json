@@ -38,7 +38,7 @@
       "win_rate": "No definido",
       "closed_trades": 0,
       "total_orders": 0,
-      "avg_latency_ms": 86.64,
+      "avg_latency_ms": 52.03,
       "rejected_actions": 1,
       "sharpe_ratio": 0.0,
       "sortino_ratio": 0.0,
@@ -56,7 +56,7 @@
       "win_rate": 25.0,
       "closed_trades": 4,
       "total_orders": 8,
-      "avg_latency_ms": 284.93,
+      "avg_latency_ms": 217.8,
       "rejected_actions": 0,
       "sharpe_ratio": -4.557,
       "sortino_ratio": -4.149,
@@ -336,5 +336,5 @@
       "lane3_drawdown_pct": 27.6448
     }
   ],
-  "interpretation": "En la ventana evaluada de 25 ciclos sobre BTC-USD, la capa LLM/Laya obtuvo retorno -2.14% (vs +0.00% sin LLM y -27.27% Buy & Hold) con mayor latencia (284.9 ms), priorizando preservación de capital y trazabilidad auditable."
+  "interpretation": "En la ventana evaluada de 25 ciclos sobre BTC-USD, la capa LLM/Laya obtuvo retorno -2.14% (vs +0.00% sin LLM y -27.27% Buy & Hold) con mayor latencia (217.8 ms), priorizando preservación de capital y trazabilidad auditable."
 }

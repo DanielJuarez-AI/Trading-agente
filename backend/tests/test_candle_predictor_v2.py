@@ -1196,3 +1196,248 @@ def test_periodic_tp_sl_recalculation_and_movements_audit_endpoint(
         assert row["take_profit_price"] == pytest.approx(updates[0]["new_tp"])
         assert row["hash_verified"] is True
 
+
+def test_liquidate_all_endpoint_closes_open_positions_and_skips_closed_markets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from fastapi.testclient import TestClient
+    from backend.app.main import create_app
+    import backend.app.core.scheduler as sched_mod
+
+    cfg = _make_settings(tmp_path, monkeypatch)
+    cfg.qwen_api_key = ""
+    app = create_app(settings_override=cfg)
+    db = app.state.db
+
+    close_nvda = "2026-11-20T21:00:00Z"
+    cid_nvda = db.register_candle_idempotent(
+        {
+            "symbol": "NVDA", "interval": "1d", "open_time": "2026-11-20T00:00:00Z",
+            "close_time": close_nvda, "open": 140.0, "high": 141.0, "low": 139.0,
+            "close": 140.0, "volume": 1000.0, "source_mode": "replay",
+        }
+    )
+    db.record_cycle_result(
+        candle_id=cid_nvda,
+        decision_data={
+            "symbol": "NVDA", "interval": "1d", "candle_close_utc": close_nvda, "model_pred": 0.004,
+            "laya1_json": {"signal_action": "BUY"}, "qwen_json": {"action": "BUY"},
+            "laya2_json": {"approved": True}, "risk_status": "APPROVED", "risk_reason": "OK",
+            "final_action": "BUY", "stop_loss_price": 133.0, "take_profit_price": 150.0,
+            "latency_ms": 5.0, "qwen_execution_mode": "LOCAL_DEVICE",
+            "laya_execution_mode": "LOCAL_DEVICE", "source_mode": "replay",
+        },
+        order_data={
+            "side": "BUY", "symbol": "NVDA", "exec_price": 140.0, "quantity": 50.0, "fee": 5.0,
+            "slippage_bps": 5.0, "notional": 7000.0, "realized_pnl": None, "executed_at": close_nvda,
+        },
+        snapshot_data={
+            "candle_time": close_nvda, "symbol": "NVDA", "cash": 43000.0, "position_qty": 50.0,
+            "avg_entry_price": 140.0, "entry_cost_total": 7005.0, "position_value": 7000.0,
+            "total_equity": 50000.0, "daily_pnl_pct": 0.0, "drawdown_pct": 0.0,
+            "last_price": 140.0, "highest_price": 140.0, "stop_loss_price": 133.0,
+            "take_profit_price": 150.0, "source_mode": "replay",
+        },
+    )
+
+    close_btc = "2026-11-20T23:59:59Z"
+    cid_btc = db.register_candle_idempotent(
+        {
+            "symbol": "BTC-USD", "interval": "1d", "open_time": "2026-11-20T00:00:00Z",
+            "close_time": close_btc, "open": 60000.0, "high": 60500.0, "low": 59500.0,
+            "close": 60000.0, "volume": 500.0, "source_mode": "replay",
+        }
+    )
+    db.record_cycle_result(
+        candle_id=cid_btc,
+        decision_data={
+            "symbol": "BTC-USD", "interval": "1d", "candle_close_utc": close_btc, "model_pred": 0.005,
+            "laya1_json": {"signal_action": "BUY"}, "qwen_json": {"action": "BUY"},
+            "laya2_json": {"approved": True}, "risk_status": "APPROVED", "risk_reason": "OK",
+            "final_action": "BUY", "stop_loss_price": 57000.0, "take_profit_price": 64000.0,
+            "latency_ms": 5.0, "qwen_execution_mode": "LOCAL_DEVICE",
+            "laya_execution_mode": "LOCAL_DEVICE", "source_mode": "replay",
+        },
+        order_data={
+            "side": "BUY", "symbol": "BTC-USD", "exec_price": 60000.0, "quantity": 0.1, "fee": 3.0,
+            "slippage_bps": 5.0, "notional": 6000.0, "realized_pnl": None, "executed_at": close_btc,
+        },
+        snapshot_data={
+            "candle_time": close_btc, "symbol": "BTC-USD", "cash": 37000.0, "position_qty": 0.1,
+            "avg_entry_price": 60000.0, "entry_cost_total": 6003.0, "position_value": 6000.0,
+            "total_equity": 50000.0, "daily_pnl_pct": 0.0, "drawdown_pct": 0.0,
+            "last_price": 60000.0, "highest_price": 60000.0, "stop_loss_price": 57000.0,
+            "take_profit_price": 64000.0, "source_mode": "replay",
+        },
+    )
+
+    monkeypatch.setattr(
+        app.state.market_client,
+        "fetch_realtime_quotes_batch",
+        lambda syms: {
+            "NVDA": {"price": 146.0, "source": "TEST", "online": True},
+            "BTC-USD": {"price": 62000.0, "source": "MEXC_API", "online": True},
+        },
+    )
+    hdr = {"X-API-Key": cfg.gateway_api_key}
+
+    with TestClient(app) as client:
+        # Caso A: mercado NYSE cerrado -> liquida BTC-USD (24/7) y omite NVDA
+        monkeypatch.setattr(
+            sched_mod,
+            "get_market_session_status",
+            lambda sym, now_utc=None: {
+                "symbol": sym,
+                "is_open": sym in ("BTC-USD", "BTCUSDT"),
+                "et_time": "2026-11-23 20:00 ET",
+                "session_label": "24/7 CRIPTO" if sym in ("BTC-USD", "BTCUSDT") else "CERRADO",
+            },
+        )
+        r_partial = client.post("/api/control/liquidate_all", headers=hdr, json={"interval": "1d"})
+        assert r_partial.status_code == 200
+        b_partial = r_partial.json()
+        assert b_partial["liquidated_count"] == 1
+        assert b_partial["skipped_count"] == 1
+        assert b_partial["liquidated"][0]["symbol"] == "BTC-USD"
+        assert b_partial["skipped"][0]["symbol"] == "NVDA"
+
+        # Caso B: mercado NYSE abierto -> liquida NVDA restante
+        monkeypatch.setattr(
+            sched_mod,
+            "get_market_session_status",
+            lambda sym, now_utc=None: {
+                "symbol": sym,
+                "is_open": True,
+                "et_time": "2026-11-24 11:00 ET",
+                "session_label": "MERCADO ABIERTO",
+            },
+        )
+        r_rest = client.post("/api/control/liquidate_all", headers=hdr, json={"interval": "1d"})
+        assert r_rest.status_code == 200
+        b_rest = r_rest.json()
+        assert b_rest["liquidated_count"] == 1
+        assert b_rest["skipped_count"] == 0
+        assert b_rest["liquidated"][0]["symbol"] == "NVDA"
+
+        audit_res = client.get("/api/audit/movements?limit=50")
+        assert audit_res.status_code == 200
+        audit_body = audit_res.json()
+        assert audit_body["summary"]["open_count"] == 0
+        assert audit_body["summary"]["chain_valid"] is True
+
+        verify_res = client.get("/api/audit/verify")
+        assert verify_res.status_code == 200
+        assert verify_res.json()["valid"] is True
+
+        # Caso C: sin posiciones abiertas -> 409 Conflict
+        r_empty = client.post("/api/control/liquidate_all", headers=hdr, json={"interval": "1d"})
+        assert r_empty.status_code == 409
+
+
+def test_live_cycle_uses_realtime_timestamp_and_current_price_not_yesterday(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from backend.app.main import create_app
+    import backend.app.core.scheduler as sched_mod
+
+    cfg = _make_settings(tmp_path, monkeypatch)
+    cfg.qwen_api_key = ""
+    app = create_app(settings_override=cfg)
+    db = app.state.db
+
+    now_dt = datetime.now(timezone.utc)
+    today_prefix = now_dt.strftime("%Y-%m-%d")
+    entry_iso = (now_dt - timedelta(minutes=15)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    today_eod_iso = f"{today_prefix}T23:59:59Z"
+    yesterday_eod_iso = (now_dt - timedelta(days=1)).strftime("%Y-%m-%dT23:59:59Z")
+
+    cid_buy = db.register_candle_idempotent(
+        {
+            "symbol": "NVDA", "interval": "1h", "open_time": entry_iso,
+            "close_time": entry_iso, "open": 153.30, "high": 154.00, "low": 152.80,
+            "close": 153.30, "volume": 1000.0, "source_mode": "live",
+        }
+    )
+    db.record_cycle_result(
+        candle_id=cid_buy,
+        decision_data={
+            "symbol": "NVDA", "interval": "1h", "candle_close_utc": entry_iso, "model_pred": 0.004,
+            "laya1_json": {"signal_action": "BUY"}, "qwen_json": {"action": "BUY"},
+            "laya2_json": {"approved": True}, "risk_status": "APPROVED", "risk_reason": "OK",
+            "final_action": "BUY", "stop_loss_price": 149.36, "take_profit_price": 156.88,
+            "latency_ms": 5.0, "qwen_execution_mode": "LOCAL_DEVICE",
+            "laya_execution_mode": "LOCAL_DEVICE", "source_mode": "live",
+        },
+        order_data={
+            "side": "BUY", "symbol": "NVDA", "exec_price": 153.30, "quantity": 40.0, "fee": 3.0,
+            "slippage_bps": 5.0, "notional": 6132.0, "realized_pnl": None, "executed_at": entry_iso,
+        },
+        snapshot_data={
+            "candle_time": entry_iso, "symbol": "NVDA", "cash": 43865.0, "position_qty": 40.0,
+            "avg_entry_price": 153.30, "entry_cost_total": 6135.0, "position_value": 6132.0,
+            "total_equity": 49997.0, "daily_pnl_pct": 0.0, "drawdown_pct": 0.0,
+            "last_price": 153.30, "highest_price": 153.30, "stop_loss_price": 149.36,
+            "take_profit_price": 156.88, "source_mode": "live",
+        },
+    )
+
+    # Historial diario de 48 velas: antepenúltimas 46 suaves, ayer close=165.05/high=171.50,
+    # hoy (en formación) open=159.0, high=159.92, low=150.50, close=152.22
+    rows = []
+    start_day = now_dt.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=47)
+    for i in range(46):
+        d = start_day + timedelta(days=i)
+        px = 148.0 + (i % 5) * 0.6
+        rows.append({
+            "symbol": "NVDA", "interval": "1d",
+            "open_time": d.strftime("%Y-%m-%dT00:00:00Z"),
+            "close_time": d.strftime("%Y-%m-%dT23:59:59Z"),
+            "open": px - 0.5, "high": px + 1.0, "low": px - 1.0,
+            "close": px, "volume": 1000000.0, "source_mode": "live",
+        })
+    rows.append({
+        "symbol": "NVDA", "interval": "1d",
+        "open_time": (now_dt - timedelta(days=1)).strftime("%Y-%m-%dT00:00:00Z"),
+        "close_time": yesterday_eod_iso,
+        "open": 167.04, "high": 171.50, "low": 156.93,
+        "close": 165.05, "volume": 782593300.0, "source_mode": "live",
+    })
+    rows.append({
+        "symbol": "NVDA", "interval": "1d",
+        "open_time": f"{today_prefix}T00:00:00Z",
+        "close_time": today_eod_iso,
+        "open": 159.0, "high": 159.92, "low": 150.50,
+        "close": 152.22, "volume": 289208180.0, "source_mode": "live",
+    })
+    live_df = pd.DataFrame(rows)
+
+    captured_include_forming = {}
+
+    def fake_fetch_live(symbol: str, interval: Optional[str] = None, **kwargs):
+        captured_include_forming["val"] = bool(kwargs.get("include_forming", False))
+        return live_df.copy()
+
+    monkeypatch.setattr(app.state.market_client, "fetch_live_candles", fake_fetch_live)
+    monkeypatch.setattr(
+        app.state.market_client,
+        "fetch_realtime_quotes_batch",
+        lambda syms: {"NVDA": {"price": 152.22, "source": "YAHOO_1M", "online": True}},
+    )
+    monkeypatch.setattr(
+        sched_mod,
+        "get_market_session_status",
+        lambda sym, now_utc=None: {
+            "symbol": sym, "is_open": True,
+            "et_time": "2026-11-24 14:40 ET", "session_label": "MERCADO ABIERTO",
+        },
+    )
+
+    res = app.state.scheduler.run_single_live_cycle(symbol="NVDA", interval="1d")
+    assert captured_include_forming.get("val") is True
+    assert res["candle_close_utc"].startswith(today_prefix)
+    assert res["candle_close_utc"] not in {"2026-11-23T23:59:59Z", yesterday_eod_iso, today_eod_iso}
+    assert res["close_price"] == pytest.approx(152.22)
+    assert res["risk"]["rule_triggered"] != "TAKE_PROFIT_TRIGGERED"
+
+
+
