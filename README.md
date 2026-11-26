@@ -1,7 +1,7 @@
-# Quant Multi-Agent Trader (System-1 / System-2 Híbrido) — `v0.1.18`
+# Quant Multi-Agent Trader (System-1 / System-2 Híbrido) — `v0.1.22`
 
 > **Objetivo / Entrega:** `V.0.1` — Bot Cuantitativo Multi-Agente de Trading (Paper Trading)  
-> **Versión Actual:** **`v0.1.18`** *(generada automáticamente a partir de `18` commits en Git — formato `v0.1.<commits>`)*  
+> **Versión Actual:** **`v0.1.22`** *(generada automáticamente a partir de `22` commits en Git — formato `v0.1.<commits>`)*  
 > **Repositorio Git (Público):** [https://github.com/DanielJuarez-AI/Trading-agente](https://github.com/DanielJuarez-AI/Trading-agente)
 
 Plataforma cuantitativa multi-agente de grado terminal para trading algorítmico en modo **Paper Trading estricto** (`ENABLE_REAL_TRADING=false`, cero órdenes reales). Diseñada bajo separación institucional de **Front Office**, **Orquestador System-2**, **Middle Office** y **Back Office**, con soporte nativo para operación **Diaria (`1d` — 200 Días)** y **Horaria (`1h` — 200 Horas)**, sub-gráfica **RSI (14) Wilder**, persistencia atómica **SQLite WAL**, streaming **Server-Sent Events (SSE)** en tiempo real y compatibilidad optimizada para GPUs de **6 GB VRAM** (vía Ollama).
