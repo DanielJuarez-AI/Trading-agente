@@ -296,14 +296,33 @@ def _compute_scanner_data(
 
     rows: List[Dict[str, Any]] = []
     buy_cnt, hold_cnt, sell_cnt = 0, 0, 0
+    active_mode = request.app.state.db.get_state("source_mode", "replay") or "replay"
+    now_utc_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     for sym in settings.primary_tickers:
         try:
-            df = market_client.load_replay_candles(symbol=sym, interval=interval)
+            df = market_client.load_replay_candles(symbol=sym, interval=interval).copy()
             if len(df) < 35:
                 continue
+            if active_mode == "live":
+                cached_px: Optional[float] = None
+                with market_client._cache_lock:
+                    if market_client._is_crypto_mexc_symbol(sym):
+                        m_sym = market_client._resolve_mexc_symbol(sym)
+                        m_entry = market_client._mexc_ticker_cache.get(m_sym)
+                        if m_entry and m_entry.get("data"):
+                            cached_px = float(m_entry["data"].get("last_price") or 0.0)
+                    else:
+                        eq_entry = market_client._equity_quote_cache.get(sym)
+                        if eq_entry and eq_entry.get("data"):
+                            cached_px = float(eq_entry["data"].get("last_price") or 0.0)
+                if cached_px is not None and cached_px > 0:
+                    last_i = df.index[-1]
+                    df.at[last_i, "close"] = cached_px
+                    df.at[last_i, "high"] = max(float(df.at[last_i, "high"]), cached_px)
+                    df.at[last_i, "low"] = min(float(df.at[last_i, "low"]), cached_px)
             pr = predictor.predict_from_candles(df, symbol=sym, interval=interval)
             last_px = float(df["close"].iloc[-1])
-            close_t = str(df["close_time"].iloc[-1])
+            close_t = now_utc_iso if active_mode == "live" else str(df["close_time"].iloc[-1])
             port = paper_engine.get_portfolio_state(current_price=last_px, symbol=sym)
             pos_open = port.position_qty >= settings.min_lot_size
             l1 = laya_alpha.evaluate(
@@ -754,6 +773,49 @@ async def control_action(
                 f"{sym} liquidado @ ${res['exec_price']:,.4f} "
                 f"({res['quantity']:.4f} u.) • PnL realizado ${res['realized_pnl']:+,.2f}"
             ),
+        }
+
+    if action == "liquidate_all":
+        open_positions = [
+            p for p in db.list_positions()
+            if float(p.get("quantity") or 0.0) >= settings.min_lot_size
+        ]
+        if not open_positions:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="No hay posiciones abiertas para liquidar.",
+            )
+        syms = [p["symbol"] for p in open_positions]
+        live_quotes = request.app.state.market_client.fetch_realtime_quotes_batch(syms)
+        tf = body.interval or db.get_state("candle_interval", settings.candle_interval) or "1d"
+        liquidated = []
+        skipped = []
+        for pos in open_positions:
+            sym = pos["symbol"]
+            live_q = live_quotes.get(sym)
+            px = float(live_q["price"]) if live_q and live_q.get("price") else float(pos.get("last_price") or 0.0)
+            try:
+                res = scheduler.manual_liquidate(symbol=sym, market_price=px, interval=tf)
+                liquidated.append(res)
+            except ValueError as exc:
+                skipped.append({"symbol": sym, "reason": str(exc)})
+        if not liquidated and skipped:
+            reasons = "; ".join(f"{s['symbol']}: {s['reason']}" for s in skipped)
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"No se pudo liquidar ninguna posición abierta ({reasons}).",
+            )
+        total_pnl = round(sum(float(r.get("realized_pnl") or 0.0) for r in liquidated), 2)
+        msg = f"{len(liquidated)} posición(es) liquidada(s) • PnL realizado ${total_pnl:+,.2f}"
+        if skipped:
+            msg += f" • Omitidas por mercado cerrado: {', '.join(s['symbol'] for s in skipped)}"
+        return {
+            "liquidated_count": len(liquidated),
+            "skipped_count": len(skipped),
+            "total_realized_pnl": total_pnl,
+            "liquidated": liquidated,
+            "skipped": skipped,
+            "message": msg,
         }
 
     if action == "switch_ticker":

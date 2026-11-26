@@ -219,10 +219,12 @@ class DeterministicRiskEngine:
 
         # 1b. Salidas Protectoras Deterministas (Stop-Loss / Trailing Stop / Take-Profit)
         has_open_pos = portfolio.position_qty >= self._settings.min_lot_size
+        use_candle_extremes = source_mode != "live"
         if has_open_pos and market_price > 0 and system_status == "RUNNING":
             sl = portfolio.stop_loss_price
             if sl is not None and (
-                market_price <= sl or (candle_low is not None and candle_low <= sl)
+                market_price <= sl
+                or (use_candle_extremes and candle_low is not None and candle_low <= sl)
             ):
                 return RiskVerdict(
                     approved=True,
@@ -230,7 +232,7 @@ class DeterministicRiskEngine:
                     final_action="SELL",
                     reason=(
                         f"Stop-Loss determinista activado en {symbol}: "
-                        f"precio {market_price:.2f} (min={candle_low or market_price:.2f}) <= SL {sl:.2f}."
+                        f"precio {market_price:.2f} (min={(candle_low if use_candle_extremes and candle_low is not None else market_price):.2f}) <= SL {sl:.2f}."
                     ),
                     rule_triggered="STOP_LOSS_TRIGGERED",
                 )
@@ -255,7 +257,8 @@ class DeterministicRiskEngine:
 
             tp = portfolio.take_profit_price
             if tp is not None and (
-                market_price >= tp or (candle_high is not None and candle_high >= tp)
+                market_price >= tp
+                or (use_candle_extremes and candle_high is not None and candle_high >= tp)
             ):
                 return RiskVerdict(
                     approved=True,
@@ -263,7 +266,7 @@ class DeterministicRiskEngine:
                     final_action="SELL",
                     reason=(
                         f"Take-Profit determinista activado en {symbol}: "
-                        f"precio {market_price:.2f} (máx={candle_high or market_price:.2f}) >= TP {tp:.2f}."
+                        f"precio {market_price:.2f} (máx={(candle_high if use_candle_extremes and candle_high is not None else market_price):.2f}) >= TP {tp:.2f}."
                     ),
                     rule_triggered="TAKE_PROFIT_TRIGGERED",
                 )

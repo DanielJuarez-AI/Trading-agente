@@ -18,7 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
@@ -141,6 +141,8 @@ class TradingScheduler:
         mode = self.db.get_state("source_mode", "replay") or "replay"
         tf = self.db.get_state("candle_interval", self.settings.candle_interval) or "1d"
         if mode == "live":
+            if not get_market_session_status(sym)["is_open"]:
+                return
             self.run_single_live_cycle(symbol=sym, gateway_key=self.settings.gateway_api_key, interval=tf)
             self._daemon_cycles_run += 1
         else:
@@ -499,6 +501,14 @@ class TradingScheduler:
                 "interval": interval,
                 "final_action": verdict.final_action,
                 "risk_status": verdict.status,
+                "has_movement": order_obj is not None,
+                "side": order_obj.get("side") if order_obj is not None else None,
+                "realized_pnl": (
+                    round(float(order_obj["realized_pnl"]), 2)
+                    if (order_obj is not None and order_obj.get("realized_pnl") is not None)
+                    else None
+                ),
+                "rule_triggered": verdict.rule_triggered,
                 "total_equity": round(float(sim_exec["snapshot"]["total_equity"]), 2),
                 "total_cycle_ms": round(total_latency_ms, 2),
             },
@@ -635,6 +645,10 @@ class TradingScheduler:
                 "interval": interval,
                 "final_action": "SELL",
                 "risk_status": "APPROVED",
+                "has_movement": True,
+                "side": "SELL",
+                "realized_pnl": round(realized, 2),
+                "rule_triggered": "MANUAL_LIQUIDATION",
                 "total_cycle_ms": 0.0,
             },
         )
@@ -652,13 +666,50 @@ class TradingScheduler:
         gateway_key: Optional[str] = None,
         interval: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Consulta mercado público en modo live y ejecuta un ciclo de decisión."""
+        """Consulta mercado público en modo live en tiempo real (vela actual + cotización en vivo)."""
         sym = symbol or self.db.get_state("active_ticker", self.settings.trading_symbol) or self.settings.trading_symbol
         tf = interval or self.db.get_state("candle_interval", self.settings.candle_interval) or self.settings.candle_interval
         key = gateway_key or self.settings.gateway_api_key
         df = self.market_client.fetch_live_candles(
-            symbol=sym, interval=tf
+            symbol=sym, interval=tf, include_forming=True
+        ).copy()
+        if df.empty:
+            raise ValueError(f"Sin velas live disponibles para {sym} ({tf}).")
+
+        live_q = self.market_client.fetch_realtime_quotes_batch([sym]).get(sym)
+        now_dt = datetime.now(timezone.utc)
+        now_iso = utc_now_iso()
+        live_px = (
+            float(live_q["price"])
+            if (live_q and float(live_q.get("price") or 0.0) > 0)
+            else float(df.iloc[-1]["close"])
         )
+
+        last_idx = df.index[-1]
+        last_close_str = str(df.at[last_idx, "close_time"])
+        last_close_dt = pd.to_datetime(last_close_str, utc=True)
+
+        if last_close_dt <= pd.Timestamp(now_dt):
+            prev_close = float(df.at[last_idx, "close"])
+            new_row = {
+                "symbol": sym,
+                "interval": tf,
+                "open_time": now_iso,
+                "close_time": now_iso,
+                "open": prev_close,
+                "high": max(prev_close, live_px),
+                "low": min(prev_close, live_px),
+                "close": live_px,
+                "volume": 0.0,
+                "source_mode": "live",
+            }
+            df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+        else:
+            df.at[last_idx, "close"] = live_px
+            df.at[last_idx, "high"] = max(float(df.at[last_idx, "high"]), live_px)
+            df.at[last_idx, "low"] = min(float(df.at[last_idx, "low"]), live_px)
+            df.at[last_idx, "close_time"] = now_iso
+
         return self.process_candle_window(
             candles_df=df,
             symbol=sym,
